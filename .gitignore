@@ -1,0 +1,80 @@
+# ==========================
+# Python
+# ==========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Compiled extensions
+*.so
+*.pyd
+*.dll
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# ==========================
+# Pytest
+# ==========================
+.pytest_cache/
+.coverage
+htmlcov/
+.cache/
+
+# ==========================
+# VS Code
+# ==========================
+.vscode/
+.history/
+
+# ==========================
+# Jupyter
+# ==========================
+.ipynb_checkpoints/
+
+# ==========================
+# Logs
+# ==========================
+*.log
+
+# ==========================
+# Build
+# ==========================
+build/
+dist/
+*.egg-info/
+
+# ==========================
+# Model Checkpoints
+# ==========================
+checkpoints/
+*.ckpt
+*.pth
+*.pt
+
+# ==========================
+# Dataset
+# ==========================
+datasets/
+data/
+cache/
+features/
+mel/
+pitch/
+energy/
+duration/
+
+# ==========================
+# OS Files
+# ==========================
+.DS_Store
+Thumbs.db
+
+# ==========================
+# Temporary Files
+# ==========================
+temp_*
+*.tmp
