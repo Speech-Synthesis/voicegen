@@ -31,6 +31,11 @@ htmlcov/
 .history/
 
 # ==========================
+# Claude Code
+# ==========================
+.claude/
+
+# ==========================
 # Jupyter
 # ==========================
 .ipynb_checkpoints/
@@ -39,6 +44,9 @@ htmlcov/
 # Logs
 # ==========================
 *.log
+logs/
+*.out
+*.err
 
 # ==========================
 # Build
@@ -66,6 +74,11 @@ mel/
 pitch/
 energy/
 duration/
+pretrained_models/
+filelists/
+
+# Guideline document (optional - remove if you want to track it)
+guideline.txt
 
 # ==========================
 # OS Files

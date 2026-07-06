@@ -1,14 +1,27 @@
 # Hierarchical Disentangled Speaker-Prosody Voice Cloning
 # Target Environment: Python 3.9+ with PyTorch 1.13.1+cu116
 
+# Core dependencies
 numpy
 scipy
 librosa
+torchaudio
 pyworld
 joblib
 textgrid
 tensorboard
+
+# Speaker recognition and ASR
 speechbrain
 openai-whisper
+
+# Phonemization
 phonemizer
 praat-parselmouth
+
+# Audio preprocessing (Stage 4.1 requirements)
+pyloudnorm
+noisereduce
+
+# Optional but recommended
+webrtcvad
