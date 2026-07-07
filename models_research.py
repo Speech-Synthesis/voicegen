@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -70,13 +71,30 @@ class SynthesizerTrnResearch(SynthesizerTrn):
         # 5. Rest of standard VITS pipeline
         # Posterior Encoder: encodes linear spectrogram
         z, m_q, logs_q, y_mask = self.enc_q(spec, spec_lengths, g=g)
-        
+
         # Stochastic Duration Predictor (SDP)
-        # Use SDP in base VITS
-        logw_ = self.dp(h, x_mask, g=g)
+        # During training, compute alignment and pass ground truth durations
+        if self.use_sdp and self.training:
+            # Compute monotonic alignment (same as base VITS)
+            with torch.no_grad():
+                s_p_sq_r = torch.exp(-2 * logs_p)
+                neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p, [1], keepdim=True)
+                neg_cent2 = torch.matmul(-0.5 * (z.transpose(1, 2) ** 2), s_p_sq_r)
+                neg_cent3 = torch.matmul(z.transpose(1, 2), (m_p * s_p_sq_r))
+                neg_cent4 = torch.sum(-0.5 * (m_p ** 2) * s_p_sq_r, [1], keepdim=True)
+                neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4
+
+                from models import maximum_path
+                attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
+                attn = maximum_path(neg_cent, attn_mask.squeeze(1)).unsqueeze(1).detach()
+
+            w = attn.sum(2)
+            logw_ = self.dp(h, x_mask, w, g=g)
+        else:
+            logw_ = self.dp(h, x_mask, g=g)
         
         # Flows (Residual Coupling Block)
-        z_p = self.enc_f(z, y_mask, g=g)
+        z_p = self.flow(z, y_mask, g=g)
         
         # Decode/Generate Audio
         o = self.dec(z_p * y_mask, g=g)
