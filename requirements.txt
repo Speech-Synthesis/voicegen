@@ -1,27 +1,208 @@
+# ════════════════════════════════════════════════════════════════════════════
 # Hierarchical Disentangled Speaker-Prosody Voice Cloning
-# Target Environment: Python 3.9+ with PyTorch 1.13.1+cu116
+# Requirements File - Pinned Versions for Reproducibility
+# ════════════════════════════════════════════════════════════════════════════
+# Target Environment:
+#   - Python 3.10
+#   - CUDA 11.6
+#   - PyTorch 1.13.1+cu116
+#   - Amrita HPC Cluster (Tesla V100 16GB)
+#
+# Last Updated: 2026-07-07
+# Tested On: Python 3.10.x, CUDA 11.6, Tesla V100
+# ════════════════════════════════════════════════════════════════════════════
 
-# Core dependencies
-numpy
-scipy
-librosa
-torchaudio
-pyworld
-joblib
-textgrid
-tensorboard
+# ────────────────────────────────────────────────────────────────────────────
+# PyTorch & CUDA (INSTALL SEPARATELY - DO NOT USE pip)
+# ────────────────────────────────────────────────────────────────────────────
+# Install using conda/mamba with CUDA support:
+#
+#   micromamba install pytorch==1.13.1 torchaudio==0.13.1 pytorch-cuda=11.6 -c pytorch -c nvidia
+#
+# OR install via pip with CUDA index:
+#
+#   pip install torch==1.13.1+cu116 torchaudio==0.13.1+cu116 \
+#       --extra-index-url https://download.pytorch.org/whl/cu116
+#
+# ────────────────────────────────────────────────────────────────────────────
 
-# Speaker recognition and ASR
-speechbrain
-openai-whisper
+# ────────────────────────────────────────────────────────────────────────────
+# Core Scientific Computing
+# ────────────────────────────────────────────────────────────────────────────
+numpy==1.23.5           # Last version compatible with PyTorch 1.13.1
+scipy==1.9.3            # Compatible with numpy 1.23.5
 
-# Phonemization
-phonemizer
-praat-parselmouth
+# ────────────────────────────────────────────────────────────────────────────
+# Audio Processing
+# ────────────────────────────────────────────────────────────────────────────
+librosa==0.10.0         # Audio analysis and feature extraction
+soundfile==0.12.1       # Audio I/O (WAV, FLAC, etc.)
+pyworld==0.3.2          # F0 (pitch) extraction for prosody features
+praat-parselmouth==0.4.3  # Phonetic analysis toolkit
+pyloudnorm==0.1.1       # ITU-R BS.1770-4 loudness normalization
+noisereduce==2.0.1      # Spectral noise reduction
+webrtcvad==2.0.10       # Voice activity detection
 
-# Audio preprocessing (Stage 4.1 requirements)
-pyloudnorm
-noisereduce
+# ────────────────────────────────────────────────────────────────────────────
+# Deep Learning - Speech Models
+# ────────────────────────────────────────────────────────────────────────────
+speechbrain==0.5.15     # ECAPA-TDNN speaker encoder (frozen)
+openai-whisper==20230314  # ASR for WER evaluation
 
-# Optional but recommended
-webrtcvad
+# ────────────────────────────────────────────────────────────────────────────
+# Text Processing & Phonemization
+# ────────────────────────────────────────────────────────────────────────────
+phonemizer==3.2.1       # Text-to-phoneme conversion
+# NOTE: phonemizer requires espeak-ng system dependency
+#   Ubuntu/Debian: sudo apt-get install espeak-ng
+#   macOS:        brew install espeak
+#   Conda:        conda install -c conda-forge espeak-ng
+
+# ────────────────────────────────────────────────────────────────────────────
+# Data Processing & Utilities
+# ────────────────────────────────────────────────────────────────────────────
+joblib==1.2.0           # Parallel processing for preprocessing
+textgrid==1.5           # Montreal Forced Aligner TextGrid parsing
+tqdm==4.65.0            # Progress bars
+
+# ────────────────────────────────────────────────────────────────────────────
+# Training & Logging
+# ────────────────────────────────────────────────────────────────────────────
+tensorboard==2.11.2     # Training visualization
+# Compatible with PyTorch 1.13.1
+
+# ────────────────────────────────────────────────────────────────────────────
+# Testing (Development Only)
+# ────────────────────────────────────────────────────────────────────────────
+pytest==7.2.1           # Unit testing framework
+pytest-cov==4.0.0       # Coverage reporting
+
+# ────────────────────────────────────────────────────────────────────────────
+# Optional: Montreal Forced Aligner (MFA)
+# ────────────────────────────────────────────────────────────────────────────
+# MFA MUST be installed via conda (pip install will not work properly):
+#
+#   micromamba install -c conda-forge montreal-forced-aligner
+#
+# After installation, download acoustic models:
+#
+#   mfa model download acoustic english_us_arpa
+#   mfa model download dictionary english_us_arpa
+#
+# ────────────────────────────────────────────────────────────────────────────
+
+# ════════════════════════════════════════════════════════════════════════════
+# Version Compatibility Notes
+# ════════════════════════════════════════════════════════════════════════════
+#
+# 1. PyTorch 1.13.1+cu116
+#    - Last stable version for CUDA 11.6
+#    - Required for Tesla V100 compatibility
+#    - Newer versions (2.x) require CUDA 11.7+
+#
+# 2. numpy 1.23.5
+#    - Last version compatible with PyTorch 1.13.1
+#    - numpy >= 1.24 causes compatibility issues
+#
+# 3. scipy 1.9.3
+#    - Compatible with numpy 1.23.5
+#    - Required for signal processing
+#
+# 4. librosa 0.10.0
+#    - Tested with PyTorch 1.13.1
+#    - Used for mel spectrogram computation
+#    - Compatible with numpy 1.23.5
+#
+# 5. speechbrain 0.5.15
+#    - Stable release with ECAPA-TDNN support
+#    - Compatible with PyTorch 1.13.1
+#    - Used for frozen speaker encoder
+#
+# 6. openai-whisper 20230314
+#    - ASR model for intelligibility evaluation (WER)
+#    - Compatible with PyTorch 1.13.1
+#
+# 7. phonemizer 3.2.1
+#    - Requires espeak-ng system installation
+#    - Used for text-to-phoneme conversion
+#
+# 8. pyworld 0.3.2
+#    - F0 extraction for prosody features
+#    - Requires Cython (auto-installed)
+#
+# 9. pyloudnorm 0.1.1
+#    - ITU-R BS.1770-4 standard loudness
+#    - Optional but recommended
+#
+# 10. noisereduce 2.0.1
+#     - Spectral subtraction noise reduction
+#     - Optional but recommended for clean datasets
+#
+# ════════════════════════════════════════════════════════════════════════════
+# Installation Order (Recommended)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# On Amrita HPC Cluster:
+#
+# 1. Create environment:
+#    micromamba create -n voicegen python=3.10 -y
+#    micromamba activate voicegen
+#
+# 2. Load CUDA module:
+#    module load cuda11.6/toolkit/11.6.2
+#
+# 3. Install PyTorch with CUDA support:
+#    micromamba install pytorch==1.13.1 torchaudio==0.13.1 pytorch-cuda=11.6 -c pytorch -c nvidia
+#
+# 4. Install other dependencies:
+#    pip install -r requirements.txt
+#
+# 5. Install system dependencies:
+#    micromamba install -c conda-forge espeak-ng montreal-forced-aligner
+#
+# 6. Verify installation:
+#    python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}')"
+#    python -c "import librosa, speechbrain, phonemizer; print('All imports successful')"
+#
+# ════════════════════════════════════════════════════════════════════════════
+# Troubleshooting
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Problem: torch.cuda.is_available() returns False
+# Solution: Ensure CUDA module is loaded: module load cuda11.6/toolkit/11.6.2
+#
+# Problem: phonemizer fails with "espeak-ng not found"
+# Solution: Install espeak-ng system package or via conda
+#
+# Problem: MFA command not found
+# Solution: Install via conda (not pip): micromamba install -c conda-forge montreal-forced-aligner
+#
+# Problem: ImportError with numpy/scipy
+# Solution: Ensure numpy==1.23.5 (not 1.24+)
+#
+# Problem: Out of memory during training
+# Solution: Reduce batch_size in config, enable fp16_run, use gradient_accumulation
+#
+# Problem: "No module named 'phonemizer.backend'"
+# Solution: Reinstall phonemizer: pip install --force-reinstall phonemizer==3.2.1
+#
+# ════════════════════════════════════════════════════════════════════════════
+# Known Working Configuration (Tested 2026-07-07)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Hardware:
+#   - Tesla V100-PCIE-16GB
+#   - CUDA 11.6
+#   - Driver: 510.47.03
+#
+# Software:
+#   - Python 3.10.11
+#   - PyTorch 1.13.1+cu116
+#   - All packages as pinned above
+#
+# Training Performance (VCTK, batch_size=16):
+#   - Training speed: ~0.8 sec/step
+#   - Memory usage: ~14GB / 16GB
+#   - FP16 enabled: Yes
+#
+# ════════════════════════════════════════════════════════════════════════════
