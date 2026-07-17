@@ -258,21 +258,52 @@ item [1]:
     tasks = []
     for wav_path in wav_files:
         basename = os.path.basename(wav_path).replace(".wav", "")
-        # MFA might place TextGrid in nested speaker dirs or flat dir
-        # Let's search flat first, then matching nested path
         tg_name = f"{basename}.TextGrid"
-        tg_path = os.path.join(tg_dir, tg_name)
-        if not os.path.exists(tg_path):
-            # Check nested speaker subdirectories
-            rel_parent = os.path.basename(os.path.dirname(wav_path))
-            tg_path = os.path.join(tg_dir, rel_parent, tg_name)
-            
-        # extract speaker_id from path
-        # Assume VCTK speaker naming convention: e.g. p225, or parent folder name
-        speaker_id = os.path.basename(os.path.dirname(wav_path))
-        if not speaker_id or speaker_id == "wavs":
-            speaker_id = "0"
-            
+
+        # Extract speaker_id from filename (not directory path)
+        # VCTK naming: p225_242_mic1.wav -> speaker_id = "p225"
+        # LibriTTS naming: 1234_5678_000001.wav -> speaker_id = "1234"
+        # LJSpeech naming: LJ001-0001.wav -> speaker_id = "0" (single speaker)
+        parts = basename.split("_")
+        if len(parts) >= 2 and parts[0].startswith("p") and parts[0][1:].isdigit():
+            # VCTK format: p225_242_mic1
+            speaker_id = parts[0]
+        elif len(parts) >= 2 and parts[0].isdigit():
+            # LibriTTS format: 1234_5678_000001
+            speaker_id = parts[0]
+        else:
+            # LJSpeech or unknown: use parent directory or default to "0"
+            parent_dir = os.path.basename(os.path.dirname(wav_path))
+            if parent_dir and parent_dir != "wavs":
+                speaker_id = parent_dir
+            else:
+                speaker_id = "0"
+
+        # Search for TextGrid in multiple locations (order of preference):
+        # 1. Flat layout: alignments/file.TextGrid
+        # 2. Speaker subdirectory (from filename): alignments/p225/file.TextGrid
+        # 3. Speaker subdirectory (from wav parent): alignments/<wav_parent>/file.TextGrid
+        tg_candidates = [
+            os.path.join(tg_dir, tg_name),  # Flat
+            os.path.join(tg_dir, speaker_id, tg_name),  # Speaker subdir from filename
+        ]
+
+        # Also check wav file's parent directory (for nested wav structures)
+        wav_parent = os.path.basename(os.path.dirname(wav_path))
+        if wav_parent and wav_parent != "wavs" and wav_parent != speaker_id:
+            tg_candidates.append(os.path.join(tg_dir, wav_parent, tg_name))
+
+        # Find first existing TextGrid
+        tg_path = None
+        for candidate in tg_candidates:
+            if os.path.exists(candidate):
+                tg_path = candidate
+                break
+
+        # Default to flat path if none found (will fail gracefully in process_single)
+        if tg_path is None:
+            tg_path = tg_candidates[0]
+
         tasks.append((wav_path, tg_path, speaker_id))
         
     print("Extracting raw prosody features...")
