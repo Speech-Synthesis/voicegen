@@ -85,39 +85,68 @@ def phoneme_reduce(f0, energy, intervals):
     """
     Reduce frame features to per-phoneme values matching interval durations.
     Filters phonemes consistent with VITS text processing rules.
+
+    Handles edge cases:
+    - Intervals extending beyond audio duration (MFA alignment artifacts)
+    - F0/energy array length mismatches
+    - Empty segments after clamping
     """
     rows = []
     voiced_mask = []
     filtered_phones_list = []
-    
+
+    # Use minimum length to handle any mismatch between F0 and energy arrays
+    n_frames = min(len(f0), len(energy))
+    if n_frames == 0:
+        return np.asarray(rows, np.float32), np.asarray(voiced_mask, np.uint8), ""
+
     for phone, s, e in intervals:
         cleaned_phone = phone.lower().strip()
         # Filter silent phonemes exactly like VITS
         if cleaned_phone in ["sil", "sp", "spn", ""]:
             continue
-            
+
+        # Convert time (seconds) to frame indices
         a = int(s * SR / HOP)
-        b = max(int(s * SR / HOP) + 1, int(e * SR / HOP))
-        
+        b = int(e * SR / HOP)
+
+        # Ensure at least 1 frame per phoneme
+        if b <= a:
+            b = a + 1
+
+        # Skip intervals that start beyond available frames
+        if a >= n_frames:
+            continue
+
+        # Clamp indices to valid range [0, n_frames]
+        a = max(0, a)
+        b = min(b, n_frames)
+
+        # Safety check: skip if no valid frames after clamping
+        if b <= a:
+            continue
+
+        # Extract segments (guaranteed non-empty after above checks)
         f0_seg = f0[a:b]
         en_seg = energy[a:b]
-        
+
         # Check if voiced frames exist in this interval
         v = f0_seg > 0
         if v.any():
             pitch = np.log(f0_seg[v]).mean()
             has_voiced = 1
         else:
-            pitch = 0.0 # Placeholder, will be normalized later
+            pitch = 0.0  # Placeholder, will be normalized later
             has_voiced = 0
-            
+
+        # Energy is guaranteed non-empty, mean() is safe
         en_val = np.log(en_seg.mean() + 1e-8)
         dur_val = np.log1p(e - s)
-        
+
         rows.append([pitch, en_val, dur_val])
         voiced_mask.append(has_voiced)
         filtered_phones_list.append(cleaned_phone)
-        
+
     return np.asarray(rows, np.float32), np.asarray(voiced_mask, np.uint8), " ".join(filtered_phones_list)
 
 def process_single(wav_path, tg_path, speaker_id, out_dir):
