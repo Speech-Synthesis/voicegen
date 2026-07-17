@@ -1,16 +1,17 @@
 #!/bin/bash
 #PBS -N hdvc_full
 #PBS -l select=1:ncpus=4:ngpus=1:mem=32gb
-#PBS -l walltime=48:00:00
-#PBS -q workq
-#PBS -o logs/trainjob_full.out
-#PBS -e logs/trainjob_full.err
+#PBS -l walltime=96:00:00
+#PBS -q testq
+#PBS -o logs/trainjob_full_testq.out
+#PBS -e logs/trainjob_full_testq.err
 
 # =============================================================================
-# VITS Full Model Training - Amrita HPC
+# VITS Full Model Training - Amrita HPC (testq - longer walltime)
 # =============================================================================
-# Queue: workq (max 48h walltime, max 5 GPUs per user)
+# Queue: testq (max 96h walltime, max 1 GPU per user)
 # Resources: 4 CPUs, 1 GPU, 32GB RAM
+# Note: testq allows longer jobs but only 1 GPU per user
 # =============================================================================
 
 cd $PBS_O_WORKDIR
@@ -47,7 +48,7 @@ echo "GPU Status:"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null || echo "  nvidia-smi not available"
 echo ""
 
-# Run training
+# Run training with auto-resume support
 echo "Starting Full Research Model Training (Stage 9)..."
 echo "============================================================"
 
