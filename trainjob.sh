@@ -16,5 +16,5 @@ eval "$(micromamba shell hook --shell bash)"
 micromamba activate voicegen
 
 echo "Starting Baseline Single-Speaker Training (Stage 4)..."
-# Using base config since this is the baseline
-python train_full.py --config configs/vctk_base.json --model_dir checkpoints/baseline_ljspeech
+# LJSpeech single-speaker baseline
+python train_full.py --config configs/ljspeech_base.json --model_dir checkpoints/baseline_ljspeech
