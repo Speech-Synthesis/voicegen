@@ -251,7 +251,7 @@ class LJSpeechParser(DatasetParser):
 
 
 class VCTKParser(DatasetParser):
-    """Parser for VCTK dataset"""
+    """Parser for VCTK dataset (supports both .wav and .flac formats)"""
     def get_items(self, data_dir: str) -> List[Tuple[str, str, str]]:
         txt_dir = os.path.join(data_dir, "txt")
         wav_dir = os.path.join(data_dir, "wav48_silence_trimmed")
@@ -277,16 +277,30 @@ class VCTKParser(DatasetParser):
 
                 basename = txt_file.replace('.txt', '')
                 txt_path = os.path.join(speaker_txt_dir, txt_file)
-                wav_path = os.path.join(speaker_wav_dir, f"{basename}_mic2.wav")
 
-                if not os.path.exists(wav_path):
-                    wav_path = os.path.join(speaker_wav_dir, f"{basename}.wav")
+                # Priority order: mic1.flac > mic1.wav > mic2.flac > mic2.wav > .flac > .wav
+                # This prefers mic1 over mic2, and handles both VCTK 0.92 (flac) and older versions (wav)
+                audio_path = None
+                candidates = [
+                    f"{basename}_mic1.flac",
+                    f"{basename}_mic1.wav",
+                    f"{basename}_mic2.flac",
+                    f"{basename}_mic2.wav",
+                    f"{basename}.flac",
+                    f"{basename}.wav",
+                ]
 
-                if os.path.exists(wav_path) and os.path.exists(txt_path):
+                for candidate in candidates:
+                    candidate_path = os.path.join(speaker_wav_dir, candidate)
+                    if os.path.exists(candidate_path):
+                        audio_path = candidate_path
+                        break
+
+                if audio_path and os.path.exists(txt_path):
                     with open(txt_path, 'r', encoding='utf-8') as f:
                         text = f.read().strip()
 
-                    items.append((os.path.abspath(wav_path), text, speaker_id))
+                    items.append((os.path.abspath(audio_path), text, speaker_id))
 
         return items
 
@@ -336,8 +350,23 @@ def get_dataset_parser(dataset: str) -> DatasetParser:
 # Phonemization
 # ============================================================================
 
-def text_to_phonemes(text: str, language: str = 'en-us') -> Optional[str]:
-    """Convert text to phonemes using phonemizer"""
+def text_to_phonemes(text: str, language: str = 'en-us', skip_phonemization: bool = False) -> Optional[str]:
+    """
+    Convert text to phonemes using phonemizer
+
+    Args:
+        text: Input text
+        language: Language code for phonemizer
+        skip_phonemization: If True, skip phonemization and return normalized text
+
+    Returns:
+        Phonemized text or original text if skipped/failed
+    """
+    if skip_phonemization:
+        # Normalize text (lowercase, strip extra whitespace)
+        normalized = ' '.join(text.lower().strip().split())
+        return normalized
+
     if not HAS_PHONEMIZER:
         print("Warning: phonemizer not available, returning original text")
         return text
@@ -464,6 +493,8 @@ def main():
                        help="Limit number of files (for testing)")
     parser.add_argument("--seed", type=int, default=42,
                        help="Random seed for splitting")
+    parser.add_argument("--skip_phonemization", action="store_true", default=False,
+                       help="Skip phonemization (use normalized text instead). Useful if phonemizer causes segfaults on HPC.")
 
     args = parser.parse_args()
 
@@ -525,14 +556,22 @@ def main():
     print(f"Successfully processed {len(processed_items)}/{len(items)} files")
 
     # Phonemize text
-    print(f"\n[3/5] Phonemizing text...")
+    if args.skip_phonemization:
+        print(f"\n[3/5] Skipping phonemization (--skip_phonemization enabled)")
+        print("Using normalized text instead of phonemes")
+    else:
+        print(f"\n[3/5] Phonemizing text...")
+
     phonemized_items = []
-    for wav_path, text, speaker_id in tqdm(processed_items, desc="Phonemizing"):
-        phonemes = text_to_phonemes(text, args.language)
+    for wav_path, text, speaker_id in tqdm(processed_items, desc="Processing text"):
+        phonemes = text_to_phonemes(text, args.language, skip_phonemization=args.skip_phonemization)
         if phonemes:
             phonemized_items.append((wav_path, speaker_id, phonemes))
 
-    print(f"Successfully phonemized {len(phonemized_items)}/{len(processed_items)} items")
+    if args.skip_phonemization:
+        print(f"Successfully normalized {len(phonemized_items)}/{len(processed_items)} items")
+    else:
+        print(f"Successfully phonemized {len(phonemized_items)}/{len(processed_items)} items")
 
     # Generate train/val/test splits
     print(f"\n[4/5] Generating train/val/test splits...")
