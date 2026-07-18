@@ -3,8 +3,8 @@
 #PBS -l select=1:ncpus=4:ngpus=1:mem=32gb
 #PBS -l walltime=48:00:00
 #PBS -q workq
-#PBS -o logs/trainjob_full.out
-#PBS -e logs/trainjob_full.err
+#PBS -o /home/n_harini/voicegen/logs/trainjob_full.out
+#PBS -e /home/n_harini/voicegen/logs/trainjob_full.err
 
 # =============================================================================
 # VITS Full Model Training - Amrita HPC
