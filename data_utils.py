@@ -5,38 +5,73 @@ import torch
 import torch.utils.data
 import torch.nn.functional as F
 
-# Try to import audio libraries
-try:
-    import librosa
-    HAS_LIBROSA = True
-except ImportError:
-    HAS_LIBROSA = False
+# Try to import audio libraries (prefer soundfile > scipy > librosa due to HPC compatibility)
+HAS_SOUNDFILE = False
+HAS_SCIPY = False
+HAS_LIBROSA = False
 
 try:
-    import scipy.io.wavfile as wavfile
-    HAS_SCIPY = True
+    import soundfile as sf
+    HAS_SOUNDFILE = True
 except ImportError:
-    HAS_SCIPY = False
+    pass
+
+if not HAS_SOUNDFILE:
+    try:
+        import scipy.io.wavfile as wavfile
+        from scipy import signal as scipy_signal
+        HAS_SCIPY = True
+    except ImportError:
+        pass
+
+if not HAS_SOUNDFILE and not HAS_SCIPY:
+    try:
+        import librosa
+        HAS_LIBROSA = True
+    except (ImportError, OSError):
+        pass
 
 
 def load_wav(wav_path, sampling_rate):
     """Load audio file and resample if necessary."""
-    if HAS_LIBROSA:
-        wav, sr = librosa.load(wav_path, sr=sampling_rate)
+    # Try soundfile first (most compatible with HPC)
+    if HAS_SOUNDFILE:
+        wav, sr = sf.read(wav_path)
+        if wav.ndim > 1:
+            wav = wav[:, 0]  # Take first channel if stereo
+        wav = wav.astype(np.float32)
+        if sr != sampling_rate:
+            # Resample using scipy if available
+            if HAS_SCIPY:
+                wav = scipy_signal.resample(wav, int(len(wav) * sampling_rate / sr))
+            else:
+                import warnings
+                warnings.warn(f"Cannot resample from {sr} to {sampling_rate}, using original rate")
         return wav
-    elif HAS_SCIPY:
+
+    # Try scipy
+    if HAS_SCIPY:
         sr, wav = wavfile.read(wav_path)
+        if wav.ndim > 1:
+            wav = wav[:, 0]  # Take first channel if stereo
         if wav.dtype == np.int16:
             wav = wav.astype(np.float32) / 32768.0
         elif wav.dtype == np.int32:
             wav = wav.astype(np.float32) / 2147483648.0
+        elif wav.dtype == np.float32:
+            pass  # Already float32
+        else:
+            wav = wav.astype(np.float32)
         if sr != sampling_rate:
-            # Simple resampling - librosa is preferred
-            import warnings
-            warnings.warn(f"Resampling from {sr} to {sampling_rate} without librosa may be inaccurate")
+            wav = scipy_signal.resample(wav, int(len(wav) * sampling_rate / sr))
         return wav
-    else:
-        raise RuntimeError("Either librosa or scipy is required for audio loading")
+
+    # Try librosa as last resort
+    if HAS_LIBROSA:
+        wav, sr = librosa.load(wav_path, sr=sampling_rate)
+        return wav
+
+    raise RuntimeError("No audio library available. Install soundfile: pip install soundfile")
 
 
 def spectrogram_torch(y, n_fft, hop_size, win_size, center=False):
