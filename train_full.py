@@ -486,10 +486,12 @@ def train():
                 else:
                     outputs = net_g(x_padded, x_lengths, spec_padded, spec_lengths, sid=sid)
 
-                y_hat = outputs[0]  # Generated waveform
+                y_hat = outputs[0]  # Generated waveform segment
+                ids_slice = outputs[1]  # Slice indices
 
-                # Get real waveform segment (same length as generated)
-                y = wav_padded.unsqueeze(1)  # [B, 1, T]
+                # Slice real waveform to match generated segment
+                from models import slice_segments
+                y = slice_segments(wav_padded.unsqueeze(1), ids_slice * hps.data.hop_length, hps.train.segment_size)
 
                 # Discriminator on real and fake
                 y_d_hat_r, y_d_hat_g, _, _ = net_d(y, y_hat.detach())
@@ -529,7 +531,11 @@ def train():
                     outputs = net_g(x_padded, x_lengths, spec_padded, spec_lengths, sid=sid)
 
                 # Unpack outputs
-                y_hat, l_length, z, y_mask, x_mask, (m_p, logs_p, m_q, logs_q) = outputs
+                y_hat, ids_slice, l_length, z, y_mask, x_mask, (m_p, logs_p, m_q, logs_q) = outputs
+
+                # Slice real waveform to match generated segment
+                from models import slice_segments
+                y = slice_segments(wav_padded.unsqueeze(1), ids_slice * hps.data.hop_length, hps.train.segment_size)
 
                 # Compute mel spectrograms
                 y_mel = mel_spectrogram_torch(
