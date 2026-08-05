@@ -197,9 +197,47 @@ def mel_spectrogram_torch(y, n_fft, num_mels, sampling_rate, hop_size, win_size,
 
 
 def librosa_mel_fn(sr, n_fft, n_mels, fmin, fmax):
-    """Create mel filterbank using librosa (for compatibility)"""
-    import librosa
-    return librosa.filters.mel(sr=sr, n_fft=n_fft, n_mels=n_mels, fmin=fmin, fmax=fmax)
+    """Create mel filterbank using numpy (no librosa dependency)"""
+    # Convert Hz to mel scale
+    def hz_to_mel(hz):
+        return 2595.0 * np.log10(1.0 + hz / 700.0)
+
+    def mel_to_hz(mel):
+        return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
+
+    # Handle fmax
+    if fmax is None:
+        fmax = sr / 2.0
+
+    # Create mel points
+    mel_min = hz_to_mel(fmin)
+    mel_max = hz_to_mel(fmax)
+    mel_points = np.linspace(mel_min, mel_max, n_mels + 2)
+    hz_points = mel_to_hz(mel_points)
+
+    # Convert to FFT bin indices
+    bin_points = np.floor((n_fft + 1) * hz_points / sr).astype(int)
+
+    # Create filterbank
+    n_freqs = n_fft // 2 + 1
+    filterbank = np.zeros((n_mels, n_freqs))
+
+    for i in range(n_mels):
+        left = bin_points[i]
+        center = bin_points[i + 1]
+        right = bin_points[i + 2]
+
+        # Rising slope
+        for j in range(left, center):
+            if center != left:
+                filterbank[i, j] = (j - left) / (center - left)
+
+        # Falling slope
+        for j in range(center, right):
+            if right != center:
+                filterbank[i, j] = (right - j) / (right - center)
+
+    return filterbank.astype(np.float32)
 
 
 # ============================================================================
