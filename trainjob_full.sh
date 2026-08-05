@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -N hdvc_full
-#PBS -l select=1:ncpus=4:mem=32gb:host=node02
+#PBS -l select=1:ncpus=4:mem=32gb:host=node03
 #PBS -l walltime=48:00:00
 #PBS -q workq
 #PBS -o /home/n_harini/voicegen/logs/trainjob_full.out
