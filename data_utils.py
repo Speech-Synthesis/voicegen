@@ -41,24 +41,27 @@ def load_wav(wav_path, sampling_rate):
 
 def spectrogram_torch(y, n_fft, hop_size, win_size, center=False):
     """
-    Compute linear spectrogram using PyTorch STFT.
+    Compute log-scaled linear spectrogram using PyTorch STFT.
 
     Args:
-        y: Audio waveform [T] or [1, T]
+        y: Audio waveform [T]
         n_fft: FFT size (filter_length)
         hop_size: Hop length
         win_size: Window size
         center: Whether to center the window
 
     Returns:
-        Linear spectrogram [n_fft // 2 + 1, T']
+        Log-scaled linear spectrogram [n_fft // 2 + 1, T']
     """
-    if torch.min(y) < -1.0:
-        print(f"Warning: audio min value is {torch.min(y)}")
-    if torch.max(y) > 1.0:
-        print(f"Warning: audio max value is {torch.max(y)}")
+    # Validate input
+    if y.dim() != 1:
+        raise ValueError(f"Expected 1D audio, got shape {y.shape}")
 
-    hann_window = torch.hann_window(win_size, device=y.device)
+    if len(y) < n_fft:
+        # Pad short audio to at least n_fft length
+        y = F.pad(y, (0, n_fft - len(y)))
+
+    hann_window = torch.hann_window(win_size, device=y.device, dtype=y.dtype)
 
     # Pad audio for non-centered STFT
     if not center:
@@ -81,6 +84,10 @@ def spectrogram_torch(y, n_fft, hop_size, win_size, center=False):
 
     # Convert to magnitude spectrogram
     spec = torch.abs(spec)
+
+    # Apply log scaling (standard in VITS)
+    # Clamp to avoid log(0)
+    spec = torch.log(torch.clamp(spec, min=1e-5))
 
     return spec
 
