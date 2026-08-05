@@ -16,18 +16,52 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         self.cleaned_text = getattr(hparams.data, "cleaned_text", False)
         self.add_blank = getattr(hparams.data, "add_blank", True)
 
+        # Build speaker-to-index mapping from filelist
+        self.speaker_to_idx = self._build_speaker_mapping()
+
     def get_audio_text_speaker_pair(self, audiopath_sid_text):
         # audiopath_sid_text: [wav_path, speaker_id, phonemes]
         # Return mock tensors for testing
         wav_path, speaker_id, phonemes = audiopath_sid_text[0], audiopath_sid_text[1], audiopath_sid_text[2]
-        
+
         # mock phoneme ids
         text = torch.randint(1, 20, (len(phonemes.split()),))
         spec = torch.randn(80, len(phonemes.split()) * 2) # spec length ≈ 2 * phoneme length
         wav = torch.randn(len(phonemes.split()) * 2 * self.hop_length)
-        sid = torch.tensor(int(speaker_id))
-        
+
+        # Handle speaker_id formats:
+        # - VCTK: "p225", "p252" -> extract numeric part
+        # - LibriTTS: "1234" -> use directly
+        # - LJSpeech: "0" -> use directly
+        sid = self._parse_speaker_id(speaker_id)
+
         return (text, spec, wav, sid)
+
+    def _build_speaker_mapping(self):
+        """Build a mapping from speaker_id strings to 0-indexed integers."""
+        unique_speakers = set()
+        for item in self.audiopaths_sid_text:
+            if len(item) >= 2:
+                unique_speakers.add(str(item[1]).strip())
+
+        # Sort for reproducibility
+        sorted_speakers = sorted(unique_speakers)
+        speaker_to_idx = {spk: idx for idx, spk in enumerate(sorted_speakers)}
+
+        print(f"Built speaker mapping: {len(speaker_to_idx)} unique speakers")
+        return speaker_to_idx
+
+    def _parse_speaker_id(self, speaker_id):
+        """Map speaker_id string to 0-indexed integer tensor."""
+        speaker_id = str(speaker_id).strip()
+
+        # Use the prebuilt mapping
+        if speaker_id in self.speaker_to_idx:
+            return torch.tensor(self.speaker_to_idx[speaker_id])
+
+        # Fallback for unknown speakers (shouldn't happen if mapping built correctly)
+        print(f"Warning: Unknown speaker '{speaker_id}', using index 0")
+        return torch.tensor(0)
 
     def __getitem__(self, index):
         return self.get_audio_text_speaker_pair(self.audiopaths_sid_text[index])
