@@ -90,15 +90,19 @@ class SynthesizerTrnResearch(SynthesizerTrn):
 
             w = attn.sum(2)
             logw_ = self.dp(h, x_mask, w, g=g)
+
+            # Expand prior stats to spec time using alignment
+            m_p = torch.matmul(attn.squeeze(1).transpose(1, 2), m_p.transpose(1, 2)).transpose(1, 2)
+            logs_p = torch.matmul(attn.squeeze(1).transpose(1, 2), logs_p.transpose(1, 2)).transpose(1, 2)
         else:
             logw_ = self.dp(h, x_mask, g=g)
-        
+
         # Flows (Residual Coupling Block)
         z_p = self.flow(z, y_mask, g=g)
-        
+
         # Decode/Generate Audio
         o = self.dec(z_p * y_mask, g=g)
-        
+
         # Returns normal VITS outputs + research extras for loss and logs
         outputs = (o, logw_, z, y_mask, x_mask, (m_p, logs_p, m_q, logs_q))
         extras = (g_timbre, p, p_mask, attn_w)
