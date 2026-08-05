@@ -1067,8 +1067,10 @@ class SynthesizerTrn(nn.Module):
             logw_ = self.dp(x, x_mask, w, g=g)
 
             # Expand prior stats to spec time using alignment
-            m_p = torch.matmul(attn.squeeze(1).transpose(1, 2), m_p.transpose(1, 2)).transpose(1, 2)
-            logs_p = torch.matmul(attn.squeeze(1).transpose(1, 2), logs_p.transpose(1, 2)).transpose(1, 2)
+            # attn: [B, 1, T_spec, T_text], m_p: [B, C, T_text]
+            # Result: [B, C, T_spec]
+            m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
+            logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
         else:
             logw_ = self.dp(x, x_mask, g=g)
 
