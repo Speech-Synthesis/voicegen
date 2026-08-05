@@ -709,6 +709,10 @@ def unconstrained_rational_quadratic_spline(inputs, unnormalized_widths, unnorma
 
 def rational_quadratic_spline(inputs, unnormalized_widths, unnormalized_heights, unnormalized_derivatives, inverse=False, left=0., right=1., bottom=0., top=1., min_bin_width=1e-3, min_bin_height=1e-3, min_derivative=1e-3):
     """Rational quadratic spline implementation"""
+    # Handle empty input tensors
+    if inputs.numel() == 0:
+        return inputs, torch.zeros_like(inputs)
+
     if torch.min(inputs) < left or torch.max(inputs) > right:
         raise ValueError('Input outside domain')
 
