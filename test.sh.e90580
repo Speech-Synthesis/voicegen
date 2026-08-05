@@ -1,0 +1,31 @@
++ [[ hxB =~ i ]]
++ '[' '' = 1 ']'
++ export -f module
++ export -f switchml
++ ENV=/cm/local/apps/environment-modules/4.0.0//init/profile.sh
++ export ENV
++ BASH_ENV=/cm/local/apps/environment-modules/4.0.0//init/bash
++ export BASH_ENV
++ '[' 4 -ge 3 ']'
++ [[ hxB =~ i ]]
++ MODULESHOME=/cm/local/apps/environment-modules/4.0.0/
++ export MODULESHOME
++ [[ ! :/home/n_harini/micromamba/bin:/home/n_harini/.local/bin:/home/n_harini/.local/bin:/home/n_harini/micromamba/condabin:/cm/local/apps/gcc/7.2.0/bin:/cm/local/apps/environment-modules/4.0.0//bin:/cm/shared/apps/cuda92/toolkit/9.2.88/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/opt/ibutils/bin:/sbin:/usr/sbin:/cm/local/apps/environment-modules/4.0.0/bin:/opt/pbs/bin:/opt/dell/srvadmin/bin:/home/n_harini/.local/bin:/home/n_harini/bin: =~ :/cm/local/apps/environment-modules/4\.0\.0//bin: ]]
+++ manpath
++ manpath=/cm/local/apps/environment-modules/4.0.0//share/man:/usr/share/man/overrides:/usr/share/man:/usr/local/share/man:/opt/ibutils/share/man:/cm/local/apps/environment-modules/current/share/man:/opt/pbs/share/man
++ [[ ! :/cm/local/apps/environment-modules/4.0.0//share/man:/usr/share/man/overrides:/usr/share/man:/usr/local/share/man:/opt/ibutils/share/man:/cm/local/apps/environment-modules/current/share/man:/opt/pbs/share/man: =~ :/cm/local/apps/environment-modules/4\.0\.0//share/man: ]]
++ '[' /cm/local/modulefiles:/cm/shared/modulefiles = '' ']'
++ '[' gcc/7.2.0 = '' ']'
++ '[' '' '!=' 1 -a -r /cm/local/apps/environment-modules/4.0.0//init/modulerc -a /cm/local/modulefiles:/cm/shared/modulefiles = '' -a gcc/7.2.0 = '' ']'
++ cd /home/n_harini/voicegen
+++ hostname
++ echo 'Job started on node02'
++ date
++ module load cudall.6/toolkit/11.6.2
+++ /usr/bin/tclsh /cm/local/apps/environment-modules/4.0.0//libexec/modulecmd.tcl bash load cudall.6/toolkit/11.6.2
+ERROR: Unable to locate a modulefile for 'cudall.6/toolkit/11.6.2'
++ eval '/bin/false;'
+++ /bin/false
++ echo 'Checking GPU...'
++ nvidia-smi
++ echo Done.

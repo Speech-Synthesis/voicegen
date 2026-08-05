@@ -1,0 +1,11 @@
+#!/bin/bash
+#PBS -N test
+#PBS -q workq
+#PBS -l select=1:ncpus=1:mem=1gb
+#PBS -l walltime=00:05:00
+#PBS -o /home/n_harini/test.out
+#PBS -e /home/n_harini/test.err
+
+echo "Hello"
+hostname
+date

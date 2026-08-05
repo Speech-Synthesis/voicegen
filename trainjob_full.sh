@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -N hdvc_full
-#PBS -l select=1:ncpus=4:ngpus=1:mem=32gb
+#PBS -l select=1:ncpus=4:mem=32gb:host=node02
 #PBS -l walltime=48:00:00
 #PBS -q workq
 #PBS -o /home/n_harini/voicegen/logs/trainjob_full.out
@@ -9,9 +9,6 @@
 # =============================================================================
 # VITS Full Model Training - Amrita HPC
 # =============================================================================
-# Queue: workq (max 48h walltime, max 5 GPUs per user)
-# Resources: 4 CPUs, 1 GPU, 32GB RAM
-# =============================================================================
 
 cd $PBS_O_WORKDIR
 
@@ -19,12 +16,12 @@ cd $PBS_O_WORKDIR
 mkdir -p logs
 
 echo "============================================================"
-echo "  Job Started: $(date)"
-echo "  Job ID: $PBS_JOBID"
-echo "  Node: $(hostname)"
+echo "Job Started: $(date)"
+echo "Job ID: $PBS_JOBID"
+echo "Node: $(hostname)"
 echo "============================================================"
 
-# Load CUDA module
+# Load CUDA
 echo "Loading CUDA module..."
 module load cuda11.6/toolkit/11.6.2
 
@@ -33,27 +30,43 @@ echo "Activating voicegen environment..."
 eval "$(micromamba shell hook --shell bash)"
 micromamba activate voicegen
 
-# Print environment info
+# Environment Information
 echo ""
-echo "Environment:"
-echo "  Python: $(python --version 2>&1)"
-echo "  PyTorch: $(python -c 'import torch; print(torch.__version__)' 2>&1)"
-echo "  CUDA available: $(python -c 'import torch; print(torch.cuda.is_available())' 2>&1)"
-echo "  GPU: $(python -c 'import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A")' 2>&1)"
+echo "Environment Information"
+echo "-----------------------"
+
+python --version
+
+python -c "import torch; print('PyTorch:', torch.__version__)"
+python -c "import torch; print('CUDA Available:', torch.cuda.is_available())"
+python -c "import torch; print('CUDA Version:', torch.version.cuda)"
+
+python - <<'EOF'
+import torch
+if torch.cuda.is_available():
+    print("GPU:", torch.cuda.get_device_name(0))
+else:
+    print("GPU: Not Available")
+EOF
+
 echo ""
 
-# Show GPU status
-echo "GPU Status:"
-nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null || echo "  nvidia-smi not available"
+# GPU Status
+echo "GPU Status"
+echo "----------"
+nvidia-smi
 echo ""
 
-# Run training
-echo "Starting Full Research Model Training (Stage 9)..."
+# Start Training
+echo "============================================================"
+echo "Starting Full Research Model Training..."
 echo "============================================================"
 
-python train_full.py --config configs/vctk_full.json --model_dir checkpoints/full
+python train_full.py \
+    --config configs/vctk_full.json \
+    --model_dir checkpoints/full
 
 echo ""
 echo "============================================================"
-echo "  Job Finished: $(date)"
+echo "Job Finished: $(date)"
 echo "============================================================"
