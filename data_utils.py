@@ -145,6 +145,9 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         # Build speaker-to-index mapping from filelist
         self.speaker_to_idx = self._build_speaker_mapping()
 
+        # Build phoneme-to-index mapping from filelist
+        self.phoneme_to_idx = self._build_phoneme_mapping()
+
     def get_audio_text_speaker_pair(self, audiopath_sid_text):
         """
         Load audio and compute linear spectrogram.
@@ -160,10 +163,16 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         """
         wav_path, speaker_id, phonemes = audiopath_sid_text[0], audiopath_sid_text[1], audiopath_sid_text[2]
 
-        # Parse phonemes to token IDs (simple mapping: each phoneme -> unique ID)
+        # Parse phonemes to token IDs using vocabulary mapping
         phoneme_list = phonemes.split()
-        # Use simple hash-based token IDs (real implementation would use a vocabulary)
-        text = torch.LongTensor([hash(p) % 200 + 1 for p in phoneme_list])
+        # Map each phoneme to its index (unknown phonemes get index 1)
+        text_ids = []
+        for p in phoneme_list:
+            if p in self.phoneme_to_idx:
+                text_ids.append(self.phoneme_to_idx[p])
+            else:
+                text_ids.append(1)  # Unknown phoneme fallback
+        text = torch.LongTensor(text_ids)
 
         # Load audio
         try:
@@ -199,6 +208,22 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
 
         print(f"Built speaker mapping: {len(speaker_to_idx)} unique speakers")
         return speaker_to_idx
+
+    def _build_phoneme_mapping(self):
+        """Build a mapping from phoneme strings to 0-indexed integers."""
+        unique_phonemes = set()
+        for item in self.audiopaths_sid_text:
+            if len(item) >= 3:
+                phonemes = item[2].split()
+                unique_phonemes.update(phonemes)
+
+        # Sort for reproducibility, reserve index 0 for padding/blank
+        sorted_phonemes = sorted(unique_phonemes)
+        # Start from index 1, reserve 0 for blank/padding
+        phoneme_to_idx = {ph: idx + 1 for idx, ph in enumerate(sorted_phonemes)}
+
+        print(f"Built phoneme mapping: {len(phoneme_to_idx)} unique phonemes")
+        return phoneme_to_idx
 
     def _parse_speaker_id(self, speaker_id):
         """Map speaker_id string to 0-indexed integer tensor."""
