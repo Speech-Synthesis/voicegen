@@ -267,8 +267,10 @@ def train():
 
     if use_mock:
         print("Using MOCK dataset for training.")
-        train_dataset = MockFullDataset(size=200, segment_size=hps.train.segment_size)
-        val_dataset = MockFullDataset(size=20, segment_size=hps.train.segment_size)
+        # spec_channels must match model expectation: filter_length // 2 + 1
+        mock_spec_channels = hps.data.filter_length // 2 + 1
+        train_dataset = MockFullDataset(size=200, segment_size=hps.train.segment_size, spec_channels=mock_spec_channels)
+        val_dataset = MockFullDataset(size=20, segment_size=hps.train.segment_size, spec_channels=mock_spec_channels)
         collate_fn = TextAudioSpeakerCollateResearch()
     else:
         print(f"Using real dataset from: {hps.data.training_files}")

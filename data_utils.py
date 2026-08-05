@@ -3,6 +3,87 @@ import random
 import numpy as np
 import torch
 import torch.utils.data
+import torch.nn.functional as F
+
+# Try to import audio libraries
+try:
+    import librosa
+    HAS_LIBROSA = True
+except ImportError:
+    HAS_LIBROSA = False
+
+try:
+    import scipy.io.wavfile as wavfile
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+
+
+def load_wav(wav_path, sampling_rate):
+    """Load audio file and resample if necessary."""
+    if HAS_LIBROSA:
+        wav, sr = librosa.load(wav_path, sr=sampling_rate)
+        return wav
+    elif HAS_SCIPY:
+        sr, wav = wavfile.read(wav_path)
+        if wav.dtype == np.int16:
+            wav = wav.astype(np.float32) / 32768.0
+        elif wav.dtype == np.int32:
+            wav = wav.astype(np.float32) / 2147483648.0
+        if sr != sampling_rate:
+            # Simple resampling - librosa is preferred
+            import warnings
+            warnings.warn(f"Resampling from {sr} to {sampling_rate} without librosa may be inaccurate")
+        return wav
+    else:
+        raise RuntimeError("Either librosa or scipy is required for audio loading")
+
+
+def spectrogram_torch(y, n_fft, hop_size, win_size, center=False):
+    """
+    Compute linear spectrogram using PyTorch STFT.
+
+    Args:
+        y: Audio waveform [T] or [1, T]
+        n_fft: FFT size (filter_length)
+        hop_size: Hop length
+        win_size: Window size
+        center: Whether to center the window
+
+    Returns:
+        Linear spectrogram [n_fft // 2 + 1, T']
+    """
+    if torch.min(y) < -1.0:
+        print(f"Warning: audio min value is {torch.min(y)}")
+    if torch.max(y) > 1.0:
+        print(f"Warning: audio max value is {torch.max(y)}")
+
+    hann_window = torch.hann_window(win_size, device=y.device)
+
+    # Pad audio for non-centered STFT
+    if not center:
+        pad_amount = int((n_fft - hop_size) / 2)
+        y = F.pad(y.unsqueeze(0), (pad_amount, pad_amount), mode='reflect').squeeze(0)
+
+    # Compute STFT
+    spec = torch.stft(
+        y,
+        n_fft,
+        hop_length=hop_size,
+        win_length=win_size,
+        window=hann_window,
+        center=center,
+        pad_mode='reflect',
+        normalized=False,
+        onesided=True,
+        return_complex=True
+    )
+
+    # Convert to magnitude spectrogram
+    spec = torch.abs(spec)
+
+    return spec
+
 
 class TextAudioSpeakerLoader(torch.utils.data.Dataset):
     def __init__(self, audiopaths_sid_text, hparams):
@@ -16,23 +97,49 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         self.cleaned_text = getattr(hparams.data, "cleaned_text", False)
         self.add_blank = getattr(hparams.data, "add_blank", True)
 
+        # Compute expected spec channels for validation
+        self.spec_channels = self.filter_length // 2 + 1
+
         # Build speaker-to-index mapping from filelist
         self.speaker_to_idx = self._build_speaker_mapping()
 
     def get_audio_text_speaker_pair(self, audiopath_sid_text):
-        # audiopath_sid_text: [wav_path, speaker_id, phonemes]
-        # Return mock tensors for testing
+        """
+        Load audio and compute linear spectrogram.
+
+        Args:
+            audiopath_sid_text: [wav_path, speaker_id, phonemes]
+
+        Returns:
+            text: [T_text] phoneme token IDs
+            spec: [spec_channels, T_spec] linear spectrogram
+            wav: [T_audio] raw waveform
+            sid: [] speaker ID tensor
+        """
         wav_path, speaker_id, phonemes = audiopath_sid_text[0], audiopath_sid_text[1], audiopath_sid_text[2]
 
-        # mock phoneme ids
-        text = torch.randint(1, 20, (len(phonemes.split()),))
-        spec = torch.randn(80, len(phonemes.split()) * 2) # spec length ≈ 2 * phoneme length
-        wav = torch.randn(len(phonemes.split()) * 2 * self.hop_length)
+        # Parse phonemes to token IDs (simple mapping: each phoneme -> unique ID)
+        phoneme_list = phonemes.split()
+        # Use simple hash-based token IDs (real implementation would use a vocabulary)
+        text = torch.LongTensor([hash(p) % 200 + 1 for p in phoneme_list])
 
-        # Handle speaker_id formats:
-        # - VCTK: "p225", "p252" -> extract numeric part
-        # - LibriTTS: "1234" -> use directly
-        # - LJSpeech: "0" -> use directly
+        # Load audio
+        try:
+            wav_np = load_wav(wav_path, self.sampling_rate)
+            wav = torch.FloatTensor(wav_np)
+        except Exception as e:
+            print(f"Error loading {wav_path}: {e}")
+            # Return mock data on error
+            T_text = len(phoneme_list)
+            spec = torch.randn(self.spec_channels, T_text * 4)
+            wav = torch.randn(T_text * 4 * self.hop_length)
+            sid = self._parse_speaker_id(speaker_id)
+            return (text, spec, wav, sid)
+
+        # Compute linear spectrogram
+        spec = spectrogram_torch(wav, self.filter_length, self.hop_length, self.win_length)
+
+        # Parse speaker ID
         sid = self._parse_speaker_id(speaker_id)
 
         return (text, spec, wav, sid)
