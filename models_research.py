@@ -102,13 +102,14 @@ class SynthesizerTrnResearch(SynthesizerTrn):
         # Flows (Residual Coupling Block)
         z_p = self.flow(z, y_mask, g=g)
 
-        # Segment extraction for adversarial training (use z, not z_p)
+        # Segment extraction for adversarial training (use z for decoder, not z_p)
         from models import rand_slice_segments
         z_slice, ids_slice = rand_slice_segments(z, spec_lengths, self.segment_size)
         o = self.dec(z_slice, g=g)
 
         # Returns normal VITS outputs + research extras for loss and logs
-        outputs = (o, ids_slice, logw_, z, y_mask, x_mask, (m_p, logs_p, m_q, logs_q))
+        # Return z_p for KL loss (flow-transformed latent)
+        outputs = (o, ids_slice, logw_, z_p, y_mask, x_mask, (m_p, logs_p, m_q, logs_q))
         extras = (g_timbre, p, p_mask, attn_w)
         
         return outputs, extras

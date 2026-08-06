@@ -1078,11 +1078,12 @@ class SynthesizerTrn(nn.Module):
         else:
             logw_ = self.dp(x, x_mask, g=g)
 
-        # Segment extraction for adversarial training
+        # Segment extraction for adversarial training (use z for decoder, not z_p)
         z_slice, ids_slice = rand_slice_segments(z, spec_lengths, self.segment_size)
         o = self.dec(z_slice, g=g)
 
-        return o, ids_slice, logw_, z, y_mask, x_mask, (m_p, logs_p, m_q, logs_q)
+        # Return z_p for KL loss (flow-transformed latent)
+        return o, ids_slice, logw_, z_p, y_mask, x_mask, (m_p, logs_p, m_q, logs_q)
 
     def infer(self, x, x_lengths, sid=None, g_timbre=None, noise_scale=0.667, length_scale=1.0, noise_scale_w=0.8, max_len=None):
         """Inference pass (generate audio from text)"""

@@ -46,7 +46,7 @@ def kl_loss(z_p, logs_q, m_p, logs_p, z_mask):
     KL divergence loss between posterior and prior
 
     Args:
-        z_p: Sampled latent from prior [B, C, T]
+        z_p: Flow-transformed latent [B, C, T]
         logs_q: Log variance from posterior encoder [B, C, T]
         m_p: Mean from text encoder (prior) [B, C, T]
         logs_p: Log variance from text encoder (prior) [B, C, T]
@@ -60,6 +60,10 @@ def kl_loss(z_p, logs_q, m_p, logs_p, z_mask):
     m_p = m_p.float()
     logs_p = logs_p.float()
     z_mask = z_mask.float()
+
+    # Clamp log variances to prevent numerical explosion
+    logs_p = torch.clamp(logs_p, min=-10.0, max=10.0)
+    logs_q = torch.clamp(logs_q, min=-10.0, max=10.0)
 
     kl = logs_p - logs_q - 0.5
     kl += 0.5 * ((z_p - m_p) ** 2) * torch.exp(-2.0 * logs_p)
@@ -499,7 +503,7 @@ def train():
 
             scaler.scale(loss_disc).backward()
             scaler.unscale_(optimizer_d)
-            grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), 1000.0)
+            grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), 5.0)
             scaler.step(optimizer_d)
 
             # ================================================================
@@ -530,8 +534,30 @@ def train():
                 else:
                     outputs = net_g(x_padded, x_lengths, spec_padded, spec_lengths, sid=sid)
 
-                # Unpack outputs
-                y_hat, ids_slice, l_length, z, y_mask, x_mask, (m_p, logs_p, m_q, logs_q) = outputs
+                # Unpack outputs (z_p is flow-transformed latent for KL loss)
+                y_hat, ids_slice, l_length, z_p, y_mask, x_mask, (m_p, logs_p, m_q, logs_q) = outputs
+
+                # NaN/Inf detection (first 50 steps only to avoid log spam)
+                if step < 50:
+                    def check_tensor(name, t):
+                        if t is None:
+                            print(f"[None] {name}: is None")
+                            return
+                        if torch.isnan(t).any():
+                            print(f"[NaN] {name}: has NaN values")
+                        if torch.isinf(t).any():
+                            print(f"[Inf] {name}: has Inf values")
+                        print(f"[Stats] {name}: min={t.min().item():.4f}, max={t.max().item():.4f}, "
+                              f"mean={t.mean().item():.4f}, std={t.std().item():.4f}")
+
+                    check_tensor("z_p", z_p)
+                    check_tensor("m_p", m_p)
+                    check_tensor("logs_p", logs_p)
+                    check_tensor("m_q", m_q)
+                    check_tensor("logs_q", logs_q)
+                    if use_research:
+                        check_tensor("g_timbre", g_t)
+                        check_tensor("prosody_emb", p)
 
                 # Slice real waveform to match generated segment
                 from models import slice_segments
@@ -568,7 +594,7 @@ def train():
                 loss_mel = F.l1_loss(y_mel, y_hat_mel) * 45
 
                 # 2. KL divergence loss
-                loss_kl = kl_loss(z, logs_q, m_p, logs_p, y_mask)
+                loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, y_mask)
 
                 # 3. Duration loss (from SDP)
                 loss_duration = torch.sum(l_length.float())
@@ -592,7 +618,7 @@ def train():
             # Backward and optimize
             scaler.scale(loss_total).backward()
             scaler.unscale_(optimizer_g)
-            grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), 1000.0)
+            grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), 5.0)
             scaler.step(optimizer_g)
             scaler.update()
 
