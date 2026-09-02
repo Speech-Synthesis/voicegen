@@ -1,0 +1,95 @@
+#!/bin/bash
+#PBS -N extract_timbre
+#PBS -l select=1:ncpus=4:ngpus=1:mem=32gb
+#PBS -l walltime=04:00:00
+#PBS -q gpu
+#PBS -o extract_timbre.out
+#PBS -e extract_timbre.err
+
+# ============================================================
+# ECAPA-TDNN Timbre Embedding Extraction Job
+# ============================================================
+# This script extracts speaker embeddings from audio files using
+# the pretrained ECAPA-TDNN model from SpeechBrain.
+#
+# Usage:
+#   qsub extract_timbre.pbs
+#
+# Prerequisites:
+#   - speechbrain installed: pip install speechbrain
+#   - Prosody features already extracted (filelists/*.prosody exist)
+# ============================================================
+
+echo "============================================================"
+echo "Job Started: $(date)"
+echo "Job ID: $PBS_JOBID"
+echo "Node: $(hostname)"
+echo "============================================================"
+
+# Change to project directory
+cd $PBS_O_WORKDIR || cd /home/n_harini/voicegen
+
+# Load required modules (adjust based on your HPC)
+module load cuda/11.6 2>/dev/null || echo "CUDA module not found, using system default"
+
+# Activate conda environment
+source ~/miniconda3/etc/profile.d/conda.sh 2>/dev/null || source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null
+conda activate voicegen 2>/dev/null || echo "Using system Python"
+
+echo ""
+echo "Environment Information"
+echo "-----------------------"
+python --version
+echo "PyTorch: $(python -c 'import torch; print(torch.__version__)')"
+echo "CUDA Available: $(python -c 'import torch; print(torch.cuda.is_available())')"
+if python -c 'import torch; exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
+    echo "GPU: $(python -c 'import torch; print(torch.cuda.get_device_name(0))')"
+fi
+
+echo ""
+echo "Checking speechbrain installation..."
+python -c "from speechbrain.inference.speaker import EncoderClassifier; print('speechbrain OK')" || {
+    echo "ERROR: speechbrain not installed. Installing..."
+    pip install speechbrain
+}
+
+echo ""
+echo "============================================================"
+echo "Starting ECAPA-TDNN Timbre Extraction for VCTK..."
+echo "============================================================"
+
+# Extract timbre embeddings for VCTK
+# Adjust paths based on your data structure
+python extract_timbre_embeddings.py \
+    --filelist filelists/vctk_audio_sid_text_train.txt.prosody \
+    --filelist filelists/vctk_audio_sid_text_val.txt.prosody \
+    --output_dir data/processed/vctk/timbre \
+    --device cuda
+
+echo ""
+echo "============================================================"
+echo "Verifying extraction..."
+echo "============================================================"
+
+# Count extracted files
+TIMBRE_COUNT=$(find data/processed/vctk/timbre -name "*.npy" 2>/dev/null | wc -l)
+echo "Total timbre embeddings extracted: $TIMBRE_COUNT"
+
+# Verify a sample
+python -c "
+import numpy as np
+import glob
+
+files = glob.glob('data/processed/vctk/timbre/**/*.npy', recursive=True)
+if files:
+    sample = np.load(files[0])
+    print(f'Sample embedding shape: {sample.shape}')
+    print(f'Sample stats: min={sample.min():.4f}, max={sample.max():.4f}, mean={sample.mean():.4f}')
+else:
+    print('WARNING: No embedding files found!')
+"
+
+echo ""
+echo "============================================================"
+echo "Job Finished: $(date)"
+echo "============================================================"

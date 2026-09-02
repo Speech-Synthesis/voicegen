@@ -4,10 +4,51 @@ import torch
 import torch.utils.data
 from data_utils import TextAudioSpeakerLoader, TextAudioSpeakerCollate
 
+
+def construct_timbre_path(wav_path):
+    """
+    Construct timbre embedding path from wav path.
+
+    Supports multiple directory structures:
+        data/vctk/wavs/p225_001.wav -> data/vctk/timbre/p225_001.npy
+        data/vctk/wavs/p225/p225_001.wav -> data/vctk/timbre/p225/p225_001.npy
+        /home/user/data/wavs/file.wav -> /home/user/data/timbre/file.npy
+
+    Works with both Linux (/) and Windows (\\) paths.
+    """
+    # Normalize path separators
+    wav_path_normalized = wav_path.replace("\\", "/")
+
+    # Find the 'wavs' directory in the path
+    if "/wavs/" in wav_path_normalized:
+        # Replace /wavs/ with /timbre/
+        timbre_path = wav_path_normalized.replace("/wavs/", "/timbre/")
+    elif wav_path_normalized.endswith("/wavs"):
+        # Edge case: path ends with /wavs
+        timbre_path = wav_path_normalized[:-5] + "/timbre"
+    else:
+        # Fallback: put timbre folder next to the wav file's parent
+        parent = os.path.dirname(wav_path_normalized)
+        grandparent = os.path.dirname(parent)
+        basename = os.path.basename(wav_path_normalized)
+        timbre_path = os.path.join(grandparent, "timbre", basename)
+
+    # Change extension from .wav to .npy
+    timbre_path = os.path.splitext(timbre_path)[0] + ".npy"
+
+    return timbre_path
+
+
 class TextAudioSpeakerLoaderResearch(TextAudioSpeakerLoader):
     """
     Prosody-aware dataset loader.
     Parses filelists of format: wav_path|speaker_id|phoneme_string|prosody_npy_path
+
+    Expects timbre embeddings (ECAPA-TDNN) at:
+        wav_path.replace("/wavs/", "/timbre/").replace(".wav", ".npy")
+
+    If timbre embeddings are missing, logs a warning and returns zeros.
+    Run extract_timbre_embeddings.py to generate the embeddings.
     """
     def __init__(self, audiopaths_sid_text_prosody, hparams):
         # We override __init__ but need to load files differently
@@ -16,10 +57,59 @@ class TextAudioSpeakerLoaderResearch(TextAudioSpeakerLoader):
         # Re-parse because base class parses only 3 columns
         self.audiopaths_sid_text = self.load_filepaths_and_text_prosody(audiopaths_sid_text_prosody)
 
+        # Track timbre loading statistics
+        self._timbre_missing_warned = False
+        self._timbre_found_count = 0
+        self._timbre_missing_count = 0
+
+        # Check for timbre files availability
+        self._check_timbre_availability()
+
     def load_filepaths_and_text_prosody(self, filename, split="|"):
         with open(filename, encoding='utf-8') as f:
             filepaths_and_text = [line.strip().split(split) for line in f if line.strip()]
         return filepaths_and_text
+
+    def _check_timbre_availability(self):
+        """Check if timbre embeddings are available and log status."""
+        if len(self.audiopaths_sid_text) == 0:
+            return
+
+        # Sample first 10 files to check availability
+        sample_size = min(10, len(self.audiopaths_sid_text))
+        found = 0
+        missing_example = None
+
+        for i in range(sample_size):
+            item = self.audiopaths_sid_text[i]
+            if len(item) >= 1:
+                wav_path = item[0]
+                timbre_path = construct_timbre_path(wav_path)
+                if os.path.exists(timbre_path):
+                    found += 1
+                elif missing_example is None:
+                    missing_example = (wav_path, timbre_path)
+
+        if found == 0:
+            print("=" * 70)
+            print("WARNING: No ECAPA-TDNN timbre embeddings found!")
+            print("=" * 70)
+            print(f"Expected timbre file at: {missing_example[1]}")
+            print(f"For wav file: {missing_example[0]}")
+            print()
+            print("Training will use ZERO speaker embeddings, which will cause")
+            print("the model to fail to learn speaker-specific information.")
+            print()
+            print("To fix this, run:")
+            print("  python extract_timbre_embeddings.py \\")
+            print(f"      --filelist <your_filelist> \\")
+            print(f"      --output_dir <path_to_timbre_folder>")
+            print("=" * 70)
+        elif found < sample_size:
+            print(f"WARNING: Only {found}/{sample_size} sampled files have timbre embeddings")
+            print(f"Missing example: {missing_example[1]}")
+        else:
+            print(f"Timbre embeddings check passed ({found}/{sample_size} sampled files found)")
 
     def __getitem__(self, index):
         # Base returns: text, spec, wav, sid
@@ -64,20 +154,29 @@ class TextAudioSpeakerLoaderResearch(TextAudioSpeakerLoader):
         # Assert phoneme counts align with prosody sequence length
         assert len(text) == p_feat.size(0), \
             f"Length mismatch: text tokens ({len(text)}) vs prosody rows ({p_feat.size(0)}) for {wav_path}"
-            
+
         # Load cached speaker timbre embedding (from ECAPA-TDNN)
-        # Search for .npy timbre file: /wavs/basename.wav -> /timbre/basename.npy
-        timbre_path = wav_path.replace("/wavs/", "/timbre/").replace(".wav", ".npy")
+        timbre_path = construct_timbre_path(wav_path)
+
         if os.path.exists(timbre_path):
             try:
                 g_timbre_np = np.load(timbre_path)
                 g_timbre = torch.FloatTensor(g_timbre_np)
-            except Exception:
+                self._timbre_found_count += 1
+            except Exception as e:
+                if not self._timbre_missing_warned:
+                    print(f"WARNING: Failed to load timbre embedding {timbre_path}: {e}")
                 g_timbre = torch.zeros(192, dtype=torch.float32)
+                self._timbre_missing_count += 1
         else:
-            # If no cached file, return a dummy speaker embedding for test execution stability
+            # Log warning once
+            if not self._timbre_missing_warned:
+                print(f"WARNING: Timbre embedding not found: {timbre_path}")
+                print("         Run extract_timbre_embeddings.py to generate embeddings.")
+                self._timbre_missing_warned = True
             g_timbre = torch.zeros(192, dtype=torch.float32)
-            
+            self._timbre_missing_count += 1
+
         return (text, spec, wav, sid, p_feat, p_mask, voiced, g_timbre)
 
 class TextAudioSpeakerCollateResearch():
