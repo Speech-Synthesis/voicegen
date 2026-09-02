@@ -1,10 +1,10 @@
 #!/bin/bash
 #PBS -N extract_timbre
-#PBS -l select=1:ncpus=4:ngpus=1:mem=32gb
+#PBS -l select=1:ncpus=4:mem=32gb:host=node03
 #PBS -l walltime=04:00:00
-#PBS -q gpu
-#PBS -o extract_timbre.out
-#PBS -e extract_timbre.err
+#PBS -q workq
+#PBS -o /home/n_harini/voicegen/logs/extract_timbre.out
+#PBS -e /home/n_harini/voicegen/logs/extract_timbre.err
 
 # ============================================================
 # ECAPA-TDNN Timbre Embedding Extraction Job
@@ -27,14 +27,19 @@ echo "Node: $(hostname)"
 echo "============================================================"
 
 # Change to project directory
-cd $PBS_O_WORKDIR || cd /home/n_harini/voicegen
+cd $PBS_O_WORKDIR
 
-# Load required modules (adjust based on your HPC)
-module load cuda/11.6 2>/dev/null || echo "CUDA module not found, using system default"
+# Create log directory
+mkdir -p logs
 
-# Activate conda environment
-source ~/miniconda3/etc/profile.d/conda.sh 2>/dev/null || source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null
-conda activate voicegen 2>/dev/null || echo "Using system Python"
+# Load CUDA
+echo "Loading CUDA module..."
+module load cuda11.6/toolkit/11.6.2
+
+# Activate micromamba environment
+echo "Activating voicegen environment..."
+eval "$(micromamba shell hook --shell bash)"
+micromamba activate voicegen
 
 echo ""
 echo "Environment Information"
