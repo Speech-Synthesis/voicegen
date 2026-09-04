@@ -62,6 +62,25 @@ python -c "from speechbrain.pretrained import EncoderClassifier; print('speechbr
 }
 
 echo ""
+echo "Checking huggingface_hub compatibility..."
+# SpeechBrain 0.5.15 requires huggingface_hub with use_auth_token parameter
+python -c "
+import inspect
+import huggingface_hub
+sig = inspect.signature(huggingface_hub.hf_hub_download)
+if 'use_auth_token' in sig.parameters:
+    print(f'huggingface_hub {huggingface_hub.__version__} OK (has use_auth_token)')
+else:
+    print(f'ERROR: huggingface_hub {huggingface_hub.__version__} incompatible!')
+    print('SpeechBrain 0.5.15 requires use_auth_token parameter.')
+    print('Fix: pip install \"huggingface_hub>=0.11.0,<0.12.0\"')
+    exit(1)
+" || {
+    echo "ERROR: huggingface_hub compatibility check failed"
+    exit 1
+}
+
+echo ""
 echo "============================================================"
 echo "Starting ECAPA-TDNN Timbre Extraction for VCTK..."
 echo "============================================================"
@@ -83,19 +102,31 @@ echo "============================================================"
 TIMBRE_COUNT=$(find data/processed/vctk/timbre -name "*.npy" 2>/dev/null | wc -l)
 echo "Total timbre embeddings extracted: $TIMBRE_COUNT"
 
-# Verify a sample
+# Verify embeddings are non-zero (critical for training)
 python -c "
 import numpy as np
 import glob
+import sys
 
 files = glob.glob('data/processed/vctk/timbre/**/*.npy', recursive=True)
-if files:
-    sample = np.load(files[0])
-    print(f'Sample embedding shape: {sample.shape}')
-    print(f'Sample stats: min={sample.min():.4f}, max={sample.max():.4f}, mean={sample.mean():.4f}')
+if not files:
+    print('ERROR: No embedding files found!')
+    sys.exit(1)
+
+sample = np.load(files[0])
+print(f'Sample embedding shape: {sample.shape}')
+print(f'Sample stats: min={sample.min():.4f}, max={sample.max():.4f}, mean={sample.mean():.4f}')
+
+# Critical validation: embeddings must be non-zero
+if np.allclose(sample, 0):
+    print('ERROR: Sample embedding is all zeros! Extraction failed.')
+    sys.exit(1)
 else:
-    print('WARNING: No embedding files found!')
-"
+    print('Validation: PASSED (embeddings are non-zero)')
+" || {
+    echo "ERROR: Embedding validation failed!"
+    exit 1
+}
 
 echo ""
 echo "============================================================"

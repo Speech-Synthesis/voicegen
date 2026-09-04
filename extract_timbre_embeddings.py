@@ -53,6 +53,25 @@ except ImportError:
     print("WARNING: speechbrain not installed. Install with: pip install speechbrain")
     print("         This is required for ECAPA-TDNN speaker embeddings.")
 
+# Check huggingface_hub compatibility (SpeechBrain 0.5.15 uses deprecated use_auth_token)
+HF_HUB_COMPATIBLE = True
+HF_HUB_ERROR = None
+try:
+    import huggingface_hub
+    import inspect
+    # Check if hf_hub_download accepts use_auth_token parameter
+    sig = inspect.signature(huggingface_hub.hf_hub_download)
+    if 'use_auth_token' not in sig.parameters:
+        HF_HUB_COMPATIBLE = False
+        HF_HUB_ERROR = (
+            f"huggingface_hub {huggingface_hub.__version__} is incompatible with SpeechBrain 0.5.15.\n"
+            "SpeechBrain 0.5.15 uses the deprecated 'use_auth_token' parameter.\n"
+            "Fix: pip install 'huggingface_hub>=0.11.0,<0.12.0'"
+        )
+except Exception as e:
+    HF_HUB_COMPATIBLE = False
+    HF_HUB_ERROR = f"Could not verify huggingface_hub compatibility: {e}"
+
 
 class ECAPAExtractor:
     """ECAPA-TDNN speaker embedding extractor using SpeechBrain."""
@@ -220,6 +239,14 @@ Examples:
         print("ERROR: speechbrain is required. Install with: pip install speechbrain")
         sys.exit(1)
 
+    if not HF_HUB_COMPATIBLE:
+        print("=" * 70)
+        print("ERROR: huggingface_hub compatibility issue detected!")
+        print("=" * 70)
+        print(HF_HUB_ERROR)
+        print("=" * 70)
+        sys.exit(1)
+
     # Get wav paths
     print("=" * 60)
     print("ECAPA-TDNN Speaker Embedding Extraction")
@@ -268,13 +295,33 @@ Examples:
         print("\nAll files already processed. Nothing to do.")
         return
 
-    # Initialize extractor
+    # Initialize extractor (fail-fast: verify model loads before processing)
     print()
     device = args.device if torch.cuda.is_available() else "cpu"
     if device != args.device:
         print(f"WARNING: CUDA not available, using CPU instead")
 
-    extractor = ECAPAExtractor(device=device)
+    print("Initializing ECAPA-TDNN model (fail-fast validation)...")
+    try:
+        extractor = ECAPAExtractor(device=device)
+    except TypeError as e:
+        if "use_auth_token" in str(e):
+            print("=" * 70)
+            print("ERROR: huggingface_hub version incompatible with SpeechBrain 0.5.15")
+            print("=" * 70)
+            print("SpeechBrain 0.5.15 uses the deprecated 'use_auth_token' parameter,")
+            print("but your huggingface_hub version has removed this parameter.")
+            print()
+            print("Fix: pip install 'huggingface_hub>=0.11.0,<0.12.0'")
+            print("=" * 70)
+            sys.exit(1)
+        else:
+            raise
+    except Exception as e:
+        print(f"ERROR: Failed to initialize ECAPA-TDNN extractor: {e}")
+        sys.exit(1)
+
+    print("ECAPA-TDNN model loaded successfully. Starting extraction...")
 
     # Extract embeddings
     print(f"\nExtracting embeddings...")
@@ -318,6 +365,18 @@ Examples:
             sample = np.load(sample_files[0])
             print(f"\nSample embedding shape: {sample.shape}")
             print(f"Sample embedding stats: min={sample.min():.4f}, max={sample.max():.4f}, mean={sample.mean():.4f}")
+
+            # Validate embedding is non-zero (critical for training)
+            if np.allclose(sample, 0):
+                print("\nWARNING: Sample embedding is all zeros! This may indicate extraction issues.")
+                sys.exit(1)
+            else:
+                print("Embedding validation: PASSED (non-zero values)")
+
+    # Exit with error if all extractions failed
+    if success == 0 and failed > 0:
+        print("\nERROR: All extractions failed! Check the errors above.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

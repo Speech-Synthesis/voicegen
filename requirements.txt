@@ -47,6 +47,7 @@ webrtcvad==2.0.10       # Voice activity detection
 # Deep Learning - Speech Models
 # ────────────────────────────────────────────────────────────────────────────
 speechbrain==0.5.15     # ECAPA-TDNN speaker encoder (frozen)
+huggingface_hub>=0.11.0,<0.12.0  # PINNED: SpeechBrain 0.5.15 uses use_auth_token (removed in 0.12+)
 openai-whisper==20230314  # ASR for WER evaluation
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -117,6 +118,13 @@ pytest-cov==4.0.0       # Coverage reporting
 #    - Stable release with ECAPA-TDNN support
 #    - Compatible with PyTorch 1.13.1
 #    - Used for frozen speaker encoder
+#    - REQUIRES huggingface_hub<0.12.0 (uses deprecated use_auth_token param)
+#
+# 5a. huggingface_hub 0.11.x
+#    - PINNED for SpeechBrain 0.5.15 compatibility
+#    - SpeechBrain 0.5.15 uses use_auth_token parameter
+#    - huggingface_hub 0.12+ removed use_auth_token (replaced with token)
+#    - DO NOT upgrade without testing SpeechBrain model loading
 #
 # 6. openai-whisper 20230314
 #    - ASR model for intelligibility evaluation (WER)
@@ -185,6 +193,10 @@ pytest-cov==4.0.0       # Coverage reporting
 #
 # Problem: "No module named 'phonemizer.backend'"
 # Solution: Reinstall phonemizer: pip install --force-reinstall phonemizer==3.2.1
+#
+# Problem: "TypeError: hf_hub_download() got an unexpected keyword argument 'use_auth_token'"
+# Solution: Downgrade huggingface_hub: pip install huggingface_hub>=0.11.0,<0.12.0
+#           SpeechBrain 0.5.15 requires the deprecated use_auth_token parameter
 #
 # ════════════════════════════════════════════════════════════════════════════
 # Known Working Configuration (Tested 2026-07-07)
