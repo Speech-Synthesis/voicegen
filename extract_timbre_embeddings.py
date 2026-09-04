@@ -44,7 +44,9 @@ except ImportError:
     print("ERROR: librosa not installed. Install with: pip install librosa")
 
 try:
-    from speechbrain.inference.speaker import EncoderClassifier
+    # SpeechBrain 0.5.x uses speechbrain.pretrained
+    # SpeechBrain 1.0+ uses speechbrain.inference.speaker
+    from speechbrain.pretrained import EncoderClassifier
     HAS_SPEECHBRAIN = True
 except ImportError:
     HAS_SPEECHBRAIN = False

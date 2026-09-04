@@ -44,6 +44,7 @@ micromamba activate voicegen
 echo ""
 echo "Environment Information"
 echo "-----------------------"
+which python
 python --version
 echo "PyTorch: $(python -c 'import torch; print(torch.__version__)')"
 echo "CUDA Available: $(python -c 'import torch; print(torch.cuda.is_available())')"
@@ -53,9 +54,11 @@ fi
 
 echo ""
 echo "Checking speechbrain installation..."
-python -c "from speechbrain.inference.speaker import EncoderClassifier; print('speechbrain OK')" || {
-    echo "ERROR: speechbrain not installed. Installing..."
-    pip install speechbrain
+# SpeechBrain 0.5.x uses speechbrain.pretrained (not speechbrain.inference)
+python -c "from speechbrain.pretrained import EncoderClassifier; print('speechbrain OK')" || {
+    echo "ERROR: speechbrain not available or incompatible version."
+    echo "Expected: speechbrain 0.5.x with speechbrain.pretrained module"
+    exit 1
 }
 
 echo ""
