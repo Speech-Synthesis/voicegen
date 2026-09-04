@@ -1,0 +1,176 @@
+#!/bin/bash
+#PBS -N ecapa_download
+#PBS -l select=1:ncpus=1:mem=8gb:host=node03
+#PBS -l walltime=01:00:00
+#PBS -q workq
+#PBS -o /home/n_harini/voicegen/logs/ecapa_download.out
+#PBS -e /home/n_harini/voicegen/logs/ecapa_download.err
+
+# ============================================================
+# ECAPA-TDNN Model Download Test
+# ============================================================
+# This script downloads and tests the ECAPA-TDNN model from
+# Hugging Face on a compute node (bypasses login node timeouts).
+#
+# Usage:
+#   qsub test_ecapa_download.pbs
+#
+# After success, the model will be cached at:
+#   /home/n_harini/voicegen/pretrained_models/ecapa/
+#
+# The extract_timbre_embeddings.py script will reuse this cache.
+# ============================================================
+
+echo "============================================================"
+echo "ECAPA-TDNN Model Download Test"
+echo "============================================================"
+echo "Job Started: $(date)"
+echo "Job ID: $PBS_JOBID"
+echo "Node: $(hostname)"
+echo "============================================================"
+
+# Change to project directory
+cd $PBS_O_WORKDIR
+
+# Create directories
+mkdir -p logs
+mkdir -p pretrained_models/ecapa
+
+# Set Hugging Face cache to persistent location
+export HF_HOME=/home/n_harini/.cache/huggingface
+export HUGGINGFACE_HUB_CACHE=/home/n_harini/.cache/huggingface/hub
+mkdir -p $HF_HOME
+mkdir -p $HUGGINGFACE_HUB_CACHE
+
+echo ""
+echo "Cache Configuration"
+echo "-------------------"
+echo "HF_HOME: $HF_HOME"
+echo "HUGGINGFACE_HUB_CACHE: $HUGGINGFACE_HUB_CACHE"
+echo "SpeechBrain savedir: $(pwd)/pretrained_models/ecapa"
+
+# Activate micromamba environment
+echo ""
+echo "Activating voicegen environment..."
+eval "$(micromamba shell hook --shell bash)"
+micromamba activate voicegen
+
+echo ""
+echo "Environment Information"
+echo "-----------------------"
+which python
+python --version
+echo "PyTorch: $(python -c 'import torch; print(torch.__version__)')"
+echo "SpeechBrain: $(python -c 'import speechbrain; print(speechbrain.__version__)')"
+echo "huggingface_hub: $(python -c 'import huggingface_hub; print(huggingface_hub.__version__)')"
+
+# Test network connectivity
+echo ""
+echo "Testing network connectivity..."
+curl -s -o /dev/null -w "huggingface.co: HTTP %{http_code}\n" --connect-timeout 10 https://huggingface.co/ || echo "WARNING: huggingface.co not reachable"
+
+echo ""
+echo "============================================================"
+echo "Downloading ECAPA-TDNN model (~83MB)..."
+echo "============================================================"
+echo "Start time: $(date)"
+
+# Download and load the model
+python -c "
+import sys
+import os
+import time
+
+# Ensure cache directories are set
+os.environ['HF_HOME'] = '/home/n_harini/.cache/huggingface'
+os.environ['HUGGINGFACE_HUB_CACHE'] = '/home/n_harini/.cache/huggingface/hub'
+
+print('Importing SpeechBrain...')
+from speechbrain.pretrained import EncoderClassifier
+
+print('Loading ECAPA-TDNN model from Hugging Face...')
+print('(This will download ~83MB on first run)')
+print()
+
+start_time = time.time()
+
+try:
+    encoder = EncoderClassifier.from_hparams(
+        source='speechbrain/spkrec-ecapa-voxceleb',
+        savedir='pretrained_models/ecapa'
+    )
+    elapsed = time.time() - start_time
+    print()
+    print('=' * 60)
+    print('SUCCESS: ECAPA-TDNN model loaded successfully!')
+    print('=' * 60)
+    print(f'Download/load time: {elapsed:.1f} seconds')
+    print(f'Model saved to: pretrained_models/ecapa/')
+    print()
+
+    # Verify model can encode a dummy input
+    import torch
+    print('Testing model inference with dummy input...')
+    dummy_wav = torch.randn(1, 16000)  # 1 second of dummy audio
+    with torch.no_grad():
+        embedding = encoder.encode_batch(dummy_wav)
+    print(f'Output embedding shape: {embedding.shape}')
+    print(f'Expected shape: [1, 1, 192]')
+
+    if embedding.shape == torch.Size([1, 1, 192]):
+        print()
+        print('=' * 60)
+        print('VALIDATION PASSED: Model produces correct output shape!')
+        print('=' * 60)
+        sys.exit(0)
+    else:
+        print('ERROR: Unexpected output shape!')
+        sys.exit(1)
+
+except Exception as e:
+    print()
+    print('=' * 60)
+    print('ERROR: Failed to load ECAPA-TDNN model!')
+    print('=' * 60)
+    print(f'Exception: {type(e).__name__}: {e}')
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+"
+
+EXIT_CODE=$?
+
+echo ""
+echo "End time: $(date)"
+
+if [ $EXIT_CODE -eq 0 ]; then
+    echo ""
+    echo "============================================================"
+    echo "Verifying cached model files..."
+    echo "============================================================"
+    echo "Contents of pretrained_models/ecapa/:"
+    ls -lah pretrained_models/ecapa/
+    echo ""
+    echo "Total size:"
+    du -sh pretrained_models/ecapa/
+    echo ""
+    echo "Contents of HF cache:"
+    ls -la $HF_HOME/ 2>/dev/null || echo "(empty or not accessible)"
+    echo ""
+    echo "============================================================"
+    echo "SUCCESS: Model is ready for extract_timbre_embeddings.py"
+    echo "============================================================"
+else
+    echo ""
+    echo "============================================================"
+    echo "FAILED: Model download/load failed. Check errors above."
+    echo "============================================================"
+fi
+
+echo ""
+echo "============================================================"
+echo "Job Finished: $(date)"
+echo "Exit code: $EXIT_CODE"
+echo "============================================================"
+
+exit $EXIT_CODE
