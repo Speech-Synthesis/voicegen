@@ -183,6 +183,12 @@ class TextEncoder(nn.Module):
         self.encoder = Encoder(hidden_channels, filter_channels, n_heads, n_layers, kernel_size, p_dropout)
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
+        # Zero-initialize log-variance output for stable training start
+        # This ensures exp(logs_p) ≈ 1 at initialization
+        with torch.no_grad():
+            self.proj.weight.data[out_channels:, :, :].zero_()
+            self.proj.bias.data[out_channels:].zero_()
+
     def forward(self, x, x_lengths):
         """
         Full forward pass: embed -> encode -> project
@@ -205,6 +211,8 @@ class TextEncoder(nn.Module):
         stats = self.proj(x) * x_mask
 
         m, logs = torch.split(stats, self.out_channels, dim=1)
+        # Clamp log-variance to prevent numerical instability in KL/MAS
+        logs = torch.clamp(logs, min=-7.0, max=2.0)
         return x, m, logs, x_mask
 
     def encode(self, x, x_lengths):
@@ -236,6 +244,8 @@ class TextEncoder(nn.Module):
         """
         stats = self.proj(x) * x_mask
         m, logs = torch.split(stats, self.out_channels, dim=1)
+        # Clamp log-variance to prevent numerical instability in KL/MAS
+        logs = torch.clamp(logs, min=-7.0, max=2.0)
         return m, logs
 
 
@@ -325,12 +335,21 @@ class PosteriorEncoder(nn.Module):
         self.enc = WN(hidden_channels, kernel_size, dilation_rate, n_layers, gin_channels=gin_channels)
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
+        # Zero-initialize log-variance output for stable training start
+        # This ensures exp(logs) ≈ 1 at initialization, preventing exploding z values
+        with torch.no_grad():
+            self.proj.weight.data[out_channels:, :, :].zero_()
+            self.proj.bias.data[out_channels:].zero_()
+
     def forward(self, x, x_lengths, g=None):
         x_mask = torch.unsqueeze(sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
         x = self.pre(x) * x_mask
         x = self.enc(x, x_mask, g=g)
         stats = self.proj(x) * x_mask
         m, logs = torch.split(stats, self.out_channels, dim=1)
+        # Clamp log-variance to prevent numerical explosion
+        # max=2.0 → max std ≈ 7.4; min=-7.0 → min std ≈ 0.001
+        logs = torch.clamp(logs, min=-7.0, max=2.0)
         z = (m + torch.randn_like(m) * torch.exp(logs)) * x_mask
         return z, m, logs, x_mask
 
@@ -1057,8 +1076,12 @@ class SynthesizerTrn(nn.Module):
             # For now, use a simple ratio-based approach
             with torch.no_grad():
                 # Simple duration extraction from length ratio
-                s_p_sq_r = torch.exp(-2 * logs_p)  # [b, d, t]
-                neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p, [1], keepdim=True)  # [b, 1, t_s]
+                # Clamp logs_p before computing s_p_sq_r to prevent overflow
+                logs_p_clamped = torch.clamp(logs_p, min=-5.0, max=2.0)
+                s_p_sq_r = torch.exp(-2.0 * logs_p_clamped)  # [b, d, t]
+                # Additional safety clamp for numerical stability
+                s_p_sq_r = torch.clamp(s_p_sq_r, max=1e4)
+                neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p_clamped, [1], keepdim=True)  # [b, 1, t_s]
                 neg_cent2 = torch.matmul(-0.5 * (z_p ** 2).transpose(1, 2), s_p_sq_r)  # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
                 neg_cent3 = torch.matmul(z_p.transpose(1, 2), (m_p * s_p_sq_r))  # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
                 neg_cent4 = torch.sum(-0.5 * (m_p ** 2) * s_p_sq_r, [1], keepdim=True)  # [b, 1, t_s]

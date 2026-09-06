@@ -45,6 +45,11 @@ def kl_loss(z_p, logs_q, m_p, logs_p, z_mask):
     """
     KL divergence loss between posterior and prior
 
+    KL(q||p) = log(σ_p/σ_q) + (σ_q² + (μ_q - μ_p)²) / (2σ_p²) - 0.5
+
+    With log parameterization:
+    KL = logs_p - logs_q - 0.5 + 0.5 * (z_p - m_p)² * exp(-2 * logs_p)
+
     Args:
         z_p: Flow-transformed latent [B, C, T]
         logs_q: Log variance from posterior encoder [B, C, T]
@@ -62,11 +67,20 @@ def kl_loss(z_p, logs_q, m_p, logs_p, z_mask):
     z_mask = z_mask.float()
 
     # Clamp log variances to prevent numerical explosion
-    logs_p = torch.clamp(logs_p, min=-10.0, max=10.0)
-    logs_q = torch.clamp(logs_q, min=-10.0, max=10.0)
+    # Range [-5, 2] gives exp(-2*logs) in [0.018, 22026] - manageable
+    logs_p = torch.clamp(logs_p, min=-5.0, max=2.0)
+    logs_q = torch.clamp(logs_q, min=-5.0, max=2.0)
+
+    # Compute squared difference with safety clamp to prevent extreme values
+    diff_sq = torch.clamp((z_p - m_p) ** 2, max=1e4)
+
+    # exp(-2 * logs_p) is the inverse variance squared
+    inv_var_sq = torch.exp(-2.0 * logs_p)
+    # Additional safety clamp
+    inv_var_sq = torch.clamp(inv_var_sq, max=1e4)
 
     kl = logs_p - logs_q - 0.5
-    kl += 0.5 * ((z_p - m_p) ** 2) * torch.exp(-2.0 * logs_p)
+    kl = kl + 0.5 * diff_sq * inv_var_sq
     kl = torch.sum(kl * z_mask)
     l = kl / torch.sum(z_mask)
     return l
@@ -476,6 +490,17 @@ def train():
              p_feat_padded, p_mask_padded, voiced_padded, g_timbre_padded) = [
                 b.to(device) if torch.is_tensor(b) else b for b in batch
             ]
+
+            # ================================================================
+            # Timbre Embedding Normalization
+            # ================================================================
+            # ECAPA-TDNN embeddings have large variance (~24 std) which causes
+            # instability when used as conditioning. Normalize to unit variance.
+            # This constant was computed from VCTK ECAPA embeddings:
+            #   mean ≈ -0.5, std ≈ 24.24
+            # Ideally this should be computed from the full dataset and stored.
+            TIMBRE_STD = 24.24
+            g_timbre_padded = g_timbre_padded / TIMBRE_STD
 
             # ================================================================
             # Discriminator Step

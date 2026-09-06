@@ -77,8 +77,12 @@ class SynthesizerTrnResearch(SynthesizerTrn):
         if self.use_sdp and self.training:
             # Compute monotonic alignment (same as base VITS)
             with torch.no_grad():
-                s_p_sq_r = torch.exp(-2 * logs_p)
-                neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p, [1], keepdim=True)
+                # Clamp logs_p before computing s_p_sq_r to prevent overflow
+                logs_p_clamped = torch.clamp(logs_p, min=-5.0, max=2.0)
+                s_p_sq_r = torch.exp(-2.0 * logs_p_clamped)
+                # Additional safety clamp for numerical stability
+                s_p_sq_r = torch.clamp(s_p_sq_r, max=1e4)
+                neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p_clamped, [1], keepdim=True)
                 neg_cent2 = torch.matmul(-0.5 * (z.transpose(1, 2) ** 2), s_p_sq_r)
                 neg_cent3 = torch.matmul(z.transpose(1, 2), (m_p * s_p_sq_r))
                 neg_cent4 = torch.sum(-0.5 * (m_p ** 2) * s_p_sq_r, [1], keepdim=True)
