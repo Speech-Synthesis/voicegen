@@ -21,13 +21,18 @@ class ProsodyEncoder(nn.Module):
         # LayerNorm expects features last: shape [B, T, hidden]
         self.norms = nn.ModuleList([nn.LayerNorm(hidden) for _ in range(n_layers)])
         self.out = nn.Linear(hidden, out_dim)
+        # Residual scaling for stability (prevents gradient explosion)
+        self.residual_scale = 0.1
 
     def forward(self, p_feat, p_mask):
         # p_feat: [B, T, 3]
         # p_mask: [B, T] bool or float mask
+        # Clamp input features to prevent extreme values
+        p_feat = torch.clamp(p_feat, min=-100.0, max=100.0)
+
         h = self.inp(p_feat)                    # [B, T, hidden]
         m = p_mask.unsqueeze(-1).float()        # [B, T, 1]
-        
+
         for conv, ln in zip(self.blocks, self.norms):
             # Apply mask to block padding leakage before convolution
             masked_h = h * m
@@ -35,10 +40,10 @@ class ProsodyEncoder(nn.Module):
             conv_in = masked_h.transpose(1, 2)
             conv_out = conv(conv_in)
             r = conv_out.transpose(1, 2)        # [B, T, hidden]
-            
-            # Residual + LayerNorm
-            h = ln(h + r)
-            
+
+            # Scaled residual + LayerNorm for stability
+            h = ln(h + self.residual_scale * r)
+
         return self.out(h) * m                  # [B, T, out_dim], zero out padding
 
 class ProsodyRecon(nn.Module):

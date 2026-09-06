@@ -38,6 +38,100 @@ np.random.seed(1234)
 
 
 # ============================================================================
+# NaN Detection and Debugging Utilities
+# ============================================================================
+
+class NaNDetector:
+    """Tracks the first occurrence of NaN/Inf values for debugging."""
+    def __init__(self):
+        self.first_nan_info = None
+        self.enabled = True
+
+    def check(self, tensor, name, step, phase="forward"):
+        """Check a tensor for NaN/Inf and record the first occurrence."""
+        if not self.enabled or self.first_nan_info is not None:
+            return False
+        if tensor is None:
+            return False
+
+        has_nan = torch.isnan(tensor).any().item()
+        has_inf = torch.isinf(tensor).any().item()
+
+        if has_nan or has_inf:
+            self.first_nan_info = {
+                "step": step,
+                "phase": phase,
+                "tensor": name,
+                "has_nan": has_nan,
+                "has_inf": has_inf,
+                "min": tensor[~torch.isnan(tensor) & ~torch.isinf(tensor)].min().item() if (~torch.isnan(tensor) & ~torch.isinf(tensor)).any() else float('nan'),
+                "max": tensor[~torch.isnan(tensor) & ~torch.isinf(tensor)].max().item() if (~torch.isnan(tensor) & ~torch.isinf(tensor)).any() else float('nan'),
+                "nan_count": torch.isnan(tensor).sum().item(),
+                "inf_count": torch.isinf(tensor).sum().item(),
+                "total_elements": tensor.numel()
+            }
+            return True
+        return False
+
+    def check_gradients(self, model, step):
+        """Check all parameter gradients for NaN/Inf."""
+        if not self.enabled or self.first_nan_info is not None:
+            return False, 0.0
+
+        total_norm = 0.0
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                grad = param.grad.data
+                param_norm = grad.norm(2).item()
+                total_norm += param_norm ** 2
+
+                has_nan = torch.isnan(grad).any().item()
+                has_inf = torch.isinf(grad).any().item()
+
+                if has_nan or has_inf:
+                    self.first_nan_info = {
+                        "step": step,
+                        "phase": "gradient",
+                        "tensor": f"grad_{name}",
+                        "has_nan": has_nan,
+                        "has_inf": has_inf,
+                        "grad_norm": param_norm,
+                        "nan_count": torch.isnan(grad).sum().item(),
+                        "inf_count": torch.isinf(grad).sum().item(),
+                    }
+                    return True, total_norm ** 0.5
+
+        return False, total_norm ** 0.5
+
+    def report(self):
+        """Print detailed report of first NaN occurrence."""
+        if self.first_nan_info:
+            print("\n" + "=" * 70)
+            print("FIRST NON-FINITE VALUE DETECTED")
+            print("=" * 70)
+            for k, v in self.first_nan_info.items():
+                print(f"  {k}: {v}")
+            print("=" * 70 + "\n")
+            return True
+        return False
+
+
+def compute_grad_norm_by_module(model, module_prefixes):
+    """Compute gradient norm for specific module groups."""
+    norms = {}
+    for prefix in module_prefixes:
+        total = 0.0
+        count = 0
+        for name, param in model.named_parameters():
+            if name.startswith(prefix) and param.grad is not None:
+                total += param.grad.data.norm(2).item() ** 2
+                count += 1
+        if count > 0:
+            norms[prefix] = total ** 0.5
+    return norms
+
+
+# ============================================================================
 # VITS Loss Functions
 # ============================================================================
 
@@ -477,6 +571,14 @@ def train():
     if use_mock:
         total_steps = min(total_steps, 100)
 
+    # Initialize NaN detector for debugging
+    nan_detector = NaNDetector()
+
+    # Module prefixes for gradient norm tracking
+    module_prefixes = ["enc_p", "enc_q", "flow", "dec", "dp"]
+    if use_research:
+        module_prefixes.extend(["prosody_enc", "fusion"])
+
     epoch = 0
     while step < total_steps:
         epoch += 1
@@ -562,7 +664,20 @@ def train():
                 # Unpack outputs (z_p is flow-transformed latent for KL loss)
                 y_hat, ids_slice, l_length, z_p, y_mask, x_mask, (m_p, logs_p, m_q, logs_q) = outputs
 
-                # NaN/Inf detection (first 50 steps only to avoid log spam)
+                # NaN/Inf detection during forward pass
+                nan_in_forward = False
+                if nan_detector.enabled:
+                    nan_in_forward |= nan_detector.check(z_p, "z_p", step, "forward")
+                    nan_in_forward |= nan_detector.check(m_p, "m_p", step, "forward")
+                    nan_in_forward |= nan_detector.check(logs_p, "logs_p", step, "forward")
+                    nan_in_forward |= nan_detector.check(m_q, "m_q", step, "forward")
+                    nan_in_forward |= nan_detector.check(logs_q, "logs_q", step, "forward")
+                    nan_in_forward |= nan_detector.check(y_hat, "y_hat", step, "forward")
+                    if use_research:
+                        nan_in_forward |= nan_detector.check(g_t, "g_timbre", step, "forward")
+                        nan_in_forward |= nan_detector.check(p, "prosody_emb", step, "forward")
+
+                # Print stats for first 50 steps
                 if step < 50:
                     def check_tensor(name, t):
                         if t is None:
@@ -621,8 +736,9 @@ def train():
                 # 2. KL divergence loss
                 loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, y_mask)
 
-                # 3. Duration loss (from SDP)
-                loss_duration = torch.sum(l_length.float())
+                # 3. Duration loss (from SDP) - FIXED: average over batch
+                # The SDP returns per-sample NLL, so we average across batch
+                loss_duration = l_length.float().mean()
 
                 # 4. GAN losses
                 y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(y, y_hat)
@@ -640,24 +756,86 @@ def train():
                 # Total generator loss
                 loss_total = loss_vits + hps.research.disentangle_weight * loss_dis_total if use_research else loss_vits
 
-            # Backward and optimize
+                # Check loss for NaN
+                nan_detector.check(loss_total, "loss_total", step, "loss")
+                nan_detector.check(loss_kl, "loss_kl", step, "loss")
+                nan_detector.check(loss_duration, "loss_duration", step, "loss")
+
+            # Backward pass
             scaler.scale(loss_total).backward()
+
+            # Unscale gradients for clipping and inspection
             scaler.unscale_(optimizer_g)
-            grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), 5.0)
+
+            # Check for NaN gradients before clipping
+            nan_in_grad, total_grad_norm_before_clip = nan_detector.check_gradients(net_g, step)
+
+            if nan_in_grad:
+                # Skip this step if gradients are NaN
+                nan_detector.report()
+                print(f"[Step {step}] Skipping optimizer step due to NaN gradients")
+                optimizer_g.zero_grad()
+                scaler.update()
+                step += 1
+                continue
+
+            # Gradient clipping - use a tighter clip for stability
+            # Original VITS uses 5.0, but with research additions we use 1.0
+            grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), 1.0)
+
+            # Log gradient norm before/after clipping for debugging
+            if step < 50:
+                print(f"[Grad] Step {step}: norm_before_clip={total_grad_norm_before_clip:.4f}, norm_after_clip={grad_norm_g:.4f}")
+                # Per-module gradient norms
+                module_norms = compute_grad_norm_by_module(net_g, module_prefixes)
+                for mod, norm in module_norms.items():
+                    print(f"[Grad] {mod}: {norm:.4f}")
+
+            # Check if gradients are finite after clipping
+            if not torch.isfinite(grad_norm_g):
+                print(f"[Step {step}] Non-finite gradient norm after clipping: {grad_norm_g}")
+                optimizer_g.zero_grad()
+                scaler.update()
+                step += 1
+                continue
+
+            # Optimizer step
             scaler.step(optimizer_g)
             scaler.update()
+
+            # Check parameters after optimizer step
+            if nan_detector.enabled and step < 50:
+                for name, param in net_g.named_parameters():
+                    if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                        nan_detector.first_nan_info = {
+                            "step": step,
+                            "phase": "after_optimizer_step",
+                            "tensor": f"param_{name}",
+                            "has_nan": torch.isnan(param.data).any().item(),
+                            "has_inf": torch.isinf(param.data).any().item(),
+                        }
+                        nan_detector.report()
+                        break
 
             # ================================================================
             # Logging
             # ================================================================
             if step % hps.train.log_interval == 0:
                 lr = optimizer_g.param_groups[0]['lr']
+                # Safe extraction of loss values (handle potential NaN)
+                loss_total_val = loss_total.item() if torch.isfinite(loss_total) else float('nan')
+                loss_mel_val = loss_mel.item() if torch.isfinite(loss_mel) else float('nan')
+                loss_kl_val = loss_kl.item() if torch.isfinite(loss_kl) else float('nan')
+                loss_gen_val = loss_gen.item() if torch.isfinite(loss_gen) else float('nan')
+                loss_disc_val = loss_disc.item() if torch.isfinite(loss_disc) else float('nan')
+
                 print(f"Step {step} | Epoch {epoch} | "
-                      f"Loss Total: {loss_total.item():.3f} | "
-                      f"Loss Mel: {loss_mel.item():.3f} | "
-                      f"Loss KL: {loss_kl.item():.3f} | "
-                      f"Loss Gen: {loss_gen.item():.3f} | "
-                      f"Loss Disc: {loss_disc.item():.3f}")
+                      f"Loss Total: {loss_total_val:.3f} | "
+                      f"Loss Mel: {loss_mel_val:.3f} | "
+                      f"Loss KL: {loss_kl_val:.3f} | "
+                      f"Loss Gen: {loss_gen_val:.3f} | "
+                      f"Loss Disc: {loss_disc_val:.3f} | "
+                      f"Grad: {grad_norm_g:.3f}")
 
                 # TensorBoard logging
                 writer.add_scalar("loss/total", loss_total.item(), step)
@@ -704,6 +882,12 @@ def train():
 
         if step >= total_steps:
             break
+
+    # Final NaN detection report
+    if nan_detector.report():
+        print("WARNING: Training encountered NaN/Inf values!")
+    else:
+        print("SUCCESS: No NaN/Inf values detected during training.")
 
     print("Training complete!")
     writer.close()

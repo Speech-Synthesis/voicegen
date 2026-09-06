@@ -27,23 +27,30 @@ class CosineDisentangleLoss(nn.Module):
         # p: [B, T, Dp] prosody embedding sequence
         # p_mask: [B, T] sequence mask
         m = p_mask.unsqueeze(-1).float()
-        
+
         # Mean pool prosody embedding sequence across valid time frames
         p_bar = (p * m).sum(1) / m.sum(1).clamp(min=1.0) # [B, Dp]
-        
-        # Project and normalize to hypersphere
-        zt = F.normalize(self.wt(g), dim=-1)
-        zp = F.normalize(self.wp(p_bar), dim=-1)
-        
+
+        # Project to shared space
+        zt_proj = self.wt(g)  # [B, shared]
+        zp_proj = self.wp(p_bar)  # [B, shared]
+
+        # Safe normalize: add small epsilon to prevent division by zero
+        # This handles edge cases where projections are near-zero
+        zt_norm = zt_proj.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        zp_norm = zp_proj.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        zt = zt_proj / zt_norm
+        zp = zp_proj / zp_norm
+
         # Squared cosine similarity: values near 0 mean orthogonality (desired)
         similarity = (zt * zp).sum(-1).pow(2).mean()
-        
+
         loss = similarity
         if self.use_var_guard:
             v_t = self.var_guard(zt)
             v_p = self.var_guard(zp)
             loss = loss + 0.5 * (v_t + v_p)
-            
+
         return loss
 
 class MineDisentangleLoss(nn.Module):

@@ -14,6 +14,8 @@ class CrossAttentionFusion(nn.Module):
         self.attn = nn.MultiheadAttention(h_dim, n_heads,
                                           dropout=dropout, batch_first=True)
         self.ln = nn.LayerNorm(h_dim)
+        # Scaling factor for residual connection to prevent gradient explosion
+        self.residual_scale = 0.1
 
     def forward(self, x, g, p, p_mask):
         # x: [B, T, H]  (text encoder hidden states as queries)
@@ -21,26 +23,28 @@ class CrossAttentionFusion(nn.Module):
         # p: [B, T, Dp] (prosody embeddings)
         # p_mask: [B, T] bool (True = valid, False = pad)
         B, T, H = x.shape
-        
+
         # Project conditioning to shared key/value space
         t_tok = self.kv_t(g).unsqueeze(1)            # [B, 1, H]
         p_tok = self.kv_p(p)                         # [B, T, H]
-        
+
         # Concatenate: first token is global timbre, remaining T tokens are local prosody
         kv = torch.cat([t_tok, p_tok], dim=1)        # [B, 1+T, H]
-        
+
         # Padding mask: key_padding_mask requires True for tokens that should be IGNORED.
         # Global timbre token (index 0) is always attendable.
         # Prosody tokens are ignored if not in p_mask.
         pad_t = torch.zeros(B, 1, dtype=torch.bool, device=x.device)
         pad_p = ~p_mask.bool()                       # True for padding positions
         pad = torch.cat([pad_t, pad_p], dim=1)       # [B, 1+T]
-        
+
         # Multi-head attention: Q = x, K = V = kv
         out, attn_w = self.attn(x, kv, kv, key_padding_mask=pad,
                                 need_weights=True, average_attn_weights=True)
-        
-        return self.ln(x + out), attn_w
+
+        # Scaled residual connection for training stability
+        # This prevents the attention output from dominating early in training
+        return self.ln(x + self.residual_scale * out), attn_w
 
 class ConcatFusion(nn.Module):
     """

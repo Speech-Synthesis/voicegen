@@ -107,22 +107,42 @@ echo ""
 echo "Checking output for NaN/Inf..."
 if grep -q "\[NaN\]" logs/stability_test.out 2>/dev/null; then
     echo "WARNING: NaN values detected in training!"
-    grep "\[NaN\]" logs/stability_test.out
+    grep "\[NaN\]" logs/stability_test.out | head -10
 fi
 
 if grep -q "\[Inf\]" logs/stability_test.out 2>/dev/null; then
     echo "WARNING: Inf values detected in training!"
-    grep "\[Inf\]" logs/stability_test.out
+    grep "\[Inf\]" logs/stability_test.out | head -10
 fi
+
+# Check for FIRST NON-FINITE detection
+if grep -q "FIRST NON-FINITE" logs/stability_test.out 2>/dev/null; then
+    echo ""
+    echo "FIRST NaN/Inf DETECTION:"
+    grep -A 15 "FIRST NON-FINITE" logs/stability_test.out
+fi
+
+# Show gradient norms (indicates if clipping is working)
+echo ""
+echo "Gradient norm samples:"
+grep "\[Grad\] Step" logs/stability_test.out | tail -10
 
 # Show final statistics
 echo ""
-echo "Final training statistics:"
-grep "\[Stats\]" logs/stability_test.out | tail -20
+echo "Final training statistics (last step):"
+grep "\[Stats\]" logs/stability_test.out | tail -10
 
 echo ""
-echo "Loss summary (last 5 log entries):"
-grep "Loss Total" logs/stability_test.out | tail -5
+echo "Loss summary (last 10 log entries):"
+grep "Loss Total" logs/stability_test.out | tail -10
+
+# Check for success/failure message
+echo ""
+if grep -q "SUCCESS: No NaN/Inf values detected" logs/stability_test.out 2>/dev/null; then
+    echo "RESULT: Training completed successfully without NaN/Inf!"
+elif grep -q "WARNING: Training encountered NaN/Inf" logs/stability_test.out 2>/dev/null; then
+    echo "RESULT: Training encountered NaN/Inf values!"
+fi
 
 echo ""
 echo "============================================================"
