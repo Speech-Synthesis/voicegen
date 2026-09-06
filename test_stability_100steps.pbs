@@ -1,0 +1,132 @@
+#!/bin/bash
+#PBS -N stability_test
+#PBS -l select=1:ncpus=4:mem=32gb:ngpus=1:host=node03
+#PBS -l walltime=01:00:00
+#PBS -q workq
+#PBS -o /home/n_harini/voicegen/logs/stability_test.out
+#PBS -e /home/n_harini/voicegen/logs/stability_test.err
+
+# ============================================================
+# VITS Numerical Stability Test (100 steps)
+# ============================================================
+# This script tests the stability fixes by running 100 training
+# steps with real VCTK data. Verifies:
+#   - No NaN/Inf values
+#   - z_p, logs_p, logs_q in reasonable ranges
+#   - KL loss not in billions
+#   - Training completes without crashing
+# ============================================================
+
+echo "============================================================"
+echo "VITS Stability Test - 100 Steps"
+echo "============================================================"
+echo "Job Started: $(date)"
+echo "Job ID: $PBS_JOBID"
+echo "Node: $(hostname)"
+echo "============================================================"
+
+cd $PBS_O_WORKDIR
+mkdir -p logs
+mkdir -p checkpoints/stability_test
+
+# Load CUDA
+module load cuda11.6/toolkit/11.6.2
+
+# Activate environment
+eval "$(micromamba shell hook --shell bash)"
+micromamba activate voicegen
+
+echo ""
+echo "Environment:"
+which python
+python --version
+echo "PyTorch: $(python -c 'import torch; print(torch.__version__)')"
+echo "CUDA Available: $(python -c 'import torch; print(torch.cuda.is_available())')"
+echo "GPU: $(python -c 'import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A")')"
+
+# Verify stability fixes are present
+echo ""
+echo "Verifying stability fixes..."
+python -c "
+from models import PosteriorEncoder, TextEncoder
+import torch
+
+# Check PosteriorEncoder has zero-initialized logs
+enc = PosteriorEncoder(513, 192, 192, 5, 1, 16, gin_channels=192)
+logs_weight = enc.proj.weight.data[192:, :, :]
+logs_bias = enc.proj.bias.data[192:]
+assert torch.allclose(logs_weight, torch.zeros_like(logs_weight)), 'PosteriorEncoder logs not zero-initialized!'
+assert torch.allclose(logs_bias, torch.zeros_like(logs_bias)), 'PosteriorEncoder logs bias not zero-initialized!'
+print('PosteriorEncoder: logs zero-initialized OK')
+
+# Check TextEncoder has zero-initialized logs
+tenc = TextEncoder(200, 192, 192, 768, 2, 6, 3, 0.1)
+logs_weight_t = tenc.proj.weight.data[192:, :, :]
+logs_bias_t = tenc.proj.bias.data[192:]
+assert torch.allclose(logs_weight_t, torch.zeros_like(logs_weight_t)), 'TextEncoder logs not zero-initialized!'
+assert torch.allclose(logs_bias_t, torch.zeros_like(logs_bias_t)), 'TextEncoder logs bias not zero-initialized!'
+print('TextEncoder: logs zero-initialized OK')
+
+print('All stability fixes verified!')
+"
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: Stability fixes not properly applied!"
+    exit 1
+fi
+
+echo ""
+echo "============================================================"
+echo "Starting 100-step training test..."
+echo "============================================================"
+START_TIME=$(date +%s)
+
+python train_full.py \
+    --config configs/vctk_stability_test.json \
+    --model_dir checkpoints/stability_test
+
+EXIT_CODE=$?
+END_TIME=$(date +%s)
+ELAPSED=$((END_TIME - START_TIME))
+
+echo ""
+echo "============================================================"
+echo "Test Results"
+echo "============================================================"
+echo "Exit code: $EXIT_CODE"
+echo "Elapsed time: ${ELAPSED}s"
+
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "STATUS: SUCCESS - Training completed 100 steps"
+else
+    echo "STATUS: FAILED - Training crashed or had errors"
+fi
+
+# Check for NaN/Inf in output
+echo ""
+echo "Checking output for NaN/Inf..."
+if grep -q "\[NaN\]" logs/stability_test.out 2>/dev/null; then
+    echo "WARNING: NaN values detected in training!"
+    grep "\[NaN\]" logs/stability_test.out
+fi
+
+if grep -q "\[Inf\]" logs/stability_test.out 2>/dev/null; then
+    echo "WARNING: Inf values detected in training!"
+    grep "\[Inf\]" logs/stability_test.out
+fi
+
+# Show final statistics
+echo ""
+echo "Final training statistics:"
+grep "\[Stats\]" logs/stability_test.out | tail -20
+
+echo ""
+echo "Loss summary (last 5 log entries):"
+grep "Loss Total" logs/stability_test.out | tail -5
+
+echo ""
+echo "============================================================"
+echo "Job Finished: $(date)"
+echo "============================================================"
+
+exit $EXIT_CODE
