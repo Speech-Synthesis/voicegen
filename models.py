@@ -199,8 +199,8 @@ class TextEncoder(nn.Module):
 
         Returns:
             x: [B, H, T] encoded hidden states
-            m: [B, out_channels, T] mean
-            logs: [B, out_channels, T] log variance
+            m: [B, out_channels, T] mean (FP32 for numerical stability)
+            logs: [B, out_channels, T] log variance (FP32 for numerical stability)
             x_mask: [B, 1, T] sequence mask
         """
         x = self.emb(x) * math.sqrt(self.hidden_channels)  # [B, T, H]
@@ -208,11 +208,15 @@ class TextEncoder(nn.Module):
         x_mask = torch.unsqueeze(sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
 
         x = self.encoder(x * x_mask, x_mask)
-        stats = self.proj(x) * x_mask
 
-        m, logs = torch.split(stats, self.out_channels, dim=1)
-        # Clamp log-variance to prevent numerical instability in KL/MAS
-        logs = torch.clamp(logs, min=-7.0, max=2.0)
+        # Force FP32 for projection to prevent gradient overflow in KL loss backward
+        with torch.cuda.amp.autocast(enabled=False):
+            x_f32 = x.float()
+            x_mask_f32 = x_mask.float()
+            stats = self.proj(x_f32) * x_mask_f32
+            m, logs = torch.split(stats, self.out_channels, dim=1)
+            # Clamp log-variance to prevent numerical instability in KL/MAS
+            logs = torch.clamp(logs, min=-7.0, max=2.0)
         return x, m, logs, x_mask
 
     def encode(self, x, x_lengths):
@@ -239,13 +243,19 @@ class TextEncoder(nn.Module):
             x_mask: [B, 1, T] sequence mask
 
         Returns:
-            m: [B, out_channels, T] mean
-            logs: [B, out_channels, T] log variance
+            m: [B, out_channels, T] mean (FP32 for numerical stability)
+            logs: [B, out_channels, T] log variance (FP32 for numerical stability)
         """
-        stats = self.proj(x) * x_mask
-        m, logs = torch.split(stats, self.out_channels, dim=1)
-        # Clamp log-variance to prevent numerical instability in KL/MAS
-        logs = torch.clamp(logs, min=-7.0, max=2.0)
+        # Force FP32 for the entire projection to prevent gradient overflow
+        # The KL loss gradient d/d(m_p) = -(z_p - m_p) * exp(-2*logs_p) can exceed FP16 max
+        # Running in FP32 ensures both forward and backward use FP32
+        with torch.cuda.amp.autocast(enabled=False):
+            x_f32 = x.float()
+            x_mask_f32 = x_mask.float()
+            stats = self.proj(x_f32) * x_mask_f32
+            m, logs = torch.split(stats, self.out_channels, dim=1)
+            # Clamp log-variance to prevent numerical instability in KL/MAS
+            logs = torch.clamp(logs, min=-7.0, max=2.0)
         return m, logs
 
 
@@ -345,12 +355,18 @@ class PosteriorEncoder(nn.Module):
         x_mask = torch.unsqueeze(sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
         x = self.pre(x) * x_mask
         x = self.enc(x, x_mask, g=g)
-        stats = self.proj(x) * x_mask
-        m, logs = torch.split(stats, self.out_channels, dim=1)
-        # Clamp log-variance to prevent numerical explosion
-        # max=2.0 → max std ≈ 7.4; min=-7.0 → min std ≈ 0.001
-        logs = torch.clamp(logs, min=-7.0, max=2.0)
-        z = (m + torch.randn_like(m) * torch.exp(logs)) * x_mask
+
+        # Force FP32 for projection and reparameterization to prevent gradient overflow
+        with torch.cuda.amp.autocast(enabled=False):
+            x_f32 = x.float()
+            x_mask_f32 = x_mask.float()
+            stats = self.proj(x_f32) * x_mask_f32
+            m, logs = torch.split(stats, self.out_channels, dim=1)
+            # Clamp log-variance to prevent numerical explosion
+            # max=2.0 → max std ≈ 7.4; min=-7.0 → min std ≈ 0.001
+            logs = torch.clamp(logs, min=-7.0, max=2.0)
+            # Compute z in FP32 for numerical stability (used in flow and KL loss)
+            z = (m + torch.randn_like(m) * torch.exp(logs)) * x_mask_f32
         return z, m, logs, x_mask
 
 
@@ -389,12 +405,13 @@ class ResidualCouplingLayer(nn.Module):
             logs = torch.zeros_like(m)
 
         if not reverse:
-            x1 = m + x1 * torch.exp(logs) * x_mask
+            # Use FP32 for exp to prevent overflow in backward pass
+            x1 = m + x1 * torch.exp(logs.float()).to(x.dtype) * x_mask
             x = torch.cat([x0, x1], 1)
-            logdet = torch.sum(logs, [1, 2])
-            return x, logdet
+            logdet = torch.sum(logs.float(), [1, 2])
+            return x, logdet.to(x.dtype)
         else:
-            x1 = (x1 - m) * torch.exp(-logs) * x_mask
+            x1 = (x1 - m) * torch.exp(-logs.float()).to(x.dtype) * x_mask
             x = torch.cat([x0, x1], 1)
             return x
 
@@ -417,6 +434,11 @@ class ResidualCouplingBlock(nn.Module):
             self.flows.append(Flip())
 
     def forward(self, x, x_mask, g=None, reverse=False):
+        # Ensure computation stays in FP32 for numerical stability
+        x = x.float()
+        x_mask = x_mask.float()
+        if g is not None:
+            g = g.float()
         if not reverse:
             for flow in self.flows:
                 x, _ = flow(x, x_mask, g=g, reverse=reverse)
@@ -677,14 +699,21 @@ class ConvFlow(nn.Module):
         b, c, t = x0.shape
         h = h.reshape(b, c, -1, t).permute(0, 1, 3, 2)  # [b, cx?, t] -> [b, c, t, ?]
 
-        unnormalized_widths = h[..., :self.num_bins] / math.sqrt(self.filter_channels)
-        unnormalized_heights = h[..., self.num_bins:2 * self.num_bins] / math.sqrt(self.filter_channels)
-        unnormalized_derivatives = h[..., 2 * self.num_bins:]
+        # Force FP32 for spline transform - complex numerical operations can overflow in FP16
+        with torch.cuda.amp.autocast(enabled=False):
+            h_f32 = h.float()
+            x1_f32 = x1.float()
+            x_mask_f32 = x_mask.float()
 
-        x1, logabsdet = piecewise_rational_quadratic_transform(x1, unnormalized_widths, unnormalized_heights, unnormalized_derivatives, inverse=reverse, tails='linear', tail_bound=self.tail_bound)
+            unnormalized_widths = h_f32[..., :self.num_bins] / math.sqrt(self.filter_channels)
+            unnormalized_heights = h_f32[..., self.num_bins:2 * self.num_bins] / math.sqrt(self.filter_channels)
+            unnormalized_derivatives = h_f32[..., 2 * self.num_bins:]
 
-        x = torch.cat([x0, x1], 1) * x_mask
-        logdet = torch.sum(logabsdet * x_mask, [1, 2])
+            x1_out, logabsdet = piecewise_rational_quadratic_transform(x1_f32, unnormalized_widths, unnormalized_heights, unnormalized_derivatives, inverse=reverse, tails='linear', tail_bound=self.tail_bound)
+
+            x = torch.cat([x0.float(), x1_out], 1) * x_mask_f32
+            logdet = torch.sum(logabsdet * x_mask_f32, [1, 2])
+
         if not reverse:
             return x, logdet
         else:
