@@ -113,7 +113,11 @@ class SynthesizerTrnResearch(SynthesizerTrn):
         # Segment extraction for adversarial training (use z for decoder, not z_p)
         from models import rand_slice_segments
         z_slice, ids_slice = rand_slice_segments(z, spec_lengths, self.segment_size)
-        o = self.dec(z_slice, g=g)
+        # Decoder is built from weight_norm'd convs throughout. weight_norm's backward
+        # divides by ||v||, which overflows FP16 easily under autocast even when the
+        # forward values are unremarkable -- force FP32 for the decoder's fwd/bwd.
+        with torch.cuda.amp.autocast(enabled=False):
+            o = self.dec(z_slice.float(), g=g.float())
 
         # Returns normal VITS outputs + research extras for loss and logs
         # Return z_p for KL loss (flow-transformed latent)
@@ -167,8 +171,9 @@ class SynthesizerTrnResearch(SynthesizerTrn):
         # Flow reverse
         z = self.enc_f(z_p, y_mask, g=g, reverse=True)
         
-        # Dec
-        o = self.dec(z * y_mask, g=g)
+        # Dec (same FP32 override as forward() -- see comment there)
+        with torch.cuda.amp.autocast(enabled=False):
+            o = self.dec((z * y_mask).float(), g=g.float())
         
         return o, y_mask, attn_w
 

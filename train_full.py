@@ -46,10 +46,11 @@ class NaNDetector:
     def __init__(self):
         self.first_nan_info = None
         self.enabled = True
+        self._reported = False
 
     def check(self, tensor, name, step, phase="forward"):
-        """Check a tensor for NaN/Inf and record the first occurrence."""
-        if not self.enabled or self.first_nan_info is not None:
+        """Check a tensor for NaN/Inf on every call; latch only the first occurrence."""
+        if not self.enabled:
             return False
         if tensor is None:
             return False
@@ -58,25 +59,28 @@ class NaNDetector:
         has_inf = torch.isinf(tensor).any().item()
 
         if has_nan or has_inf:
-            finite_mask = ~torch.isnan(tensor) & ~torch.isinf(tensor)
-            self.first_nan_info = {
-                "step": step,
-                "phase": phase,
-                "tensor": name,
-                "has_nan": has_nan,
-                "has_inf": has_inf,
-                "min": tensor[finite_mask].min().item() if finite_mask.any() else float('nan'),
-                "max": tensor[finite_mask].max().item() if finite_mask.any() else float('nan'),
-                "nan_count": torch.isnan(tensor).sum().item(),
-                "inf_count": torch.isinf(tensor).sum().item(),
-                "total_elements": tensor.numel()
-            }
+            if self.first_nan_info is None:
+                finite_mask = ~torch.isnan(tensor) & ~torch.isinf(tensor)
+                self.first_nan_info = {
+                    "step": step,
+                    "phase": phase,
+                    "tensor": name,
+                    "has_nan": has_nan,
+                    "has_inf": has_inf,
+                    "min": tensor[finite_mask].min().item() if finite_mask.any() else float('nan'),
+                    "max": tensor[finite_mask].max().item() if finite_mask.any() else float('nan'),
+                    "nan_count": torch.isnan(tensor).sum().item(),
+                    "inf_count": torch.isinf(tensor).sum().item(),
+                    "total_elements": tensor.numel()
+                }
             return True
         return False
 
     def check_gradients(self, model, step):
-        """Check all parameter gradients for NaN/Inf. Returns (has_bad, total_norm, first_bad_param)."""
-        if not self.enabled or self.first_nan_info is not None:
+        """Check all parameter gradients for NaN/Inf on every call.
+        Returns (has_bad, total_norm, first_bad_param). Only the first-ever
+        occurrence across the whole run is latched into first_nan_info."""
+        if not self.enabled:
             return False, 0.0, None
 
         total_norm_sq = 0.0
@@ -93,16 +97,17 @@ class NaNDetector:
 
                 if (has_nan or has_inf) and first_bad is None:
                     first_bad = name
-                    self.first_nan_info = {
-                        "step": step,
-                        "phase": "gradient",
-                        "tensor": f"grad_{name}",
-                        "has_nan": has_nan,
-                        "has_inf": has_inf,
-                        "grad_norm": grad_norm,
-                        "nan_count": torch.isnan(grad).sum().item(),
-                        "inf_count": torch.isinf(grad).sum().item(),
-                    }
+                    if self.first_nan_info is None:
+                        self.first_nan_info = {
+                            "step": step,
+                            "phase": "gradient",
+                            "tensor": f"grad_{name}",
+                            "has_nan": has_nan,
+                            "has_inf": has_inf,
+                            "grad_norm": grad_norm,
+                            "nan_count": torch.isnan(grad).sum().item(),
+                            "inf_count": torch.isinf(grad).sum().item(),
+                        }
 
                 # Accumulate norm (even if inf, to detect the problem)
                 if math.isfinite(grad_norm):
@@ -112,8 +117,10 @@ class NaNDetector:
         return first_bad is not None, total_norm, first_bad
 
     def report(self):
-        """Print detailed report of first NaN occurrence."""
-        if self.first_nan_info:
+        """Print detailed report of the first-ever NaN occurrence (once only;
+        later calls are no-ops so the log isn't flooded with the same block)."""
+        if self.first_nan_info and not self._reported:
+            self._reported = True
             print("\n" + "=" * 70)
             print("FIRST NON-FINITE VALUE DETECTED")
             print("=" * 70)
@@ -443,7 +450,14 @@ def train():
     parser.add_argument("--pretrain_prosody_pth", type=str, default=None, help="Pretrained prosody encoder weights")
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
     parser.add_argument("--force_mock", action="store_true", help="Force using mock dataset")
+    parser.add_argument("--detect_anomaly", action="store_true",
+                         help="Enable torch.autograd.set_detect_anomaly to pinpoint the exact "
+                              "backward op producing NaN/Inf (slow, use for short debug runs only)")
     args = parser.parse_args()
+
+    if args.detect_anomaly:
+        print("torch.autograd.set_detect_anomaly(True) enabled -- training will be much slower.")
+        torch.autograd.set_detect_anomaly(True)
 
     # Load config
     os.makedirs(args.model_dir, exist_ok=True)
@@ -672,7 +686,11 @@ def train():
                 y = slice_segments(wav_padded.unsqueeze(1), ids_slice * hps.data.hop_length, hps.train.segment_size)
 
                 # Discriminator on real and fake
-                y_d_hat_r, y_d_hat_g, _, _ = net_d(y, y_hat.detach())
+                # net_d is built from weight_norm'd convs (DiscriminatorP). weight_norm's
+                # backward divides by ||v||, which overflows FP16 easily under autocast
+                # even when forward magnitudes look fine -- force FP32 for its fwd/bwd.
+                with autocast(enabled=False):
+                    y_d_hat_r, y_d_hat_g, _, _ = net_d(y.float(), y_hat.detach().float())
                 loss_disc, losses_disc_r, losses_disc_g = discriminator_loss(y_d_hat_r, y_d_hat_g)
 
             scaler.scale(loss_disc).backward()
@@ -777,6 +795,10 @@ def train():
                     hps.data.mel_fmax
                 )
 
+                if nan_detector.enabled:
+                    nan_in_forward |= nan_detector.check(y_mel, "y_mel", step, "forward")
+                    nan_in_forward |= nan_detector.check(y_hat_mel, "y_hat_mel", step, "forward")
+
                 # ============================================================
                 # VITS Losses
                 # ============================================================
@@ -792,7 +814,11 @@ def train():
                 loss_duration = l_length.float().mean()
 
                 # 4. GAN losses
-                y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(y, y_hat)
+                # Same FP32 override as the discriminator step above -- this branch
+                # backprops through net_d into y_hat (and from there into the decoder),
+                # so an FP16 weight_norm overflow here poisons the generator's gradients.
+                with autocast(enabled=False):
+                    y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(y.float(), y_hat.float())
                 loss_fm = feature_loss(fmap_r, fmap_g)
                 loss_gen, losses_gen = generator_loss(y_d_hat_g)
 
@@ -811,6 +837,10 @@ def train():
                 nan_detector.check(loss_total, "loss_total", step, "loss")
                 nan_detector.check(loss_kl, "loss_kl", step, "loss")
                 nan_detector.check(loss_duration, "loss_duration", step, "loss")
+                nan_detector.check(loss_mel, "loss_mel", step, "loss")
+                nan_detector.check(loss_gen, "loss_gen", step, "loss")
+                nan_detector.check(loss_fm, "loss_fm", step, "loss")
+                nan_detector.check(loss_disc, "loss_disc", step, "loss")
 
             # Backward pass
             scaler.scale(loss_total).backward()
