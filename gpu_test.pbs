@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -N gpu_test
 #PBS -q workq
-#PBS -l select=1:ncpus=1:ngpus=1:mem=1gb
+#PBS -l select=1:ncpus=1:mem=1gb
 #PBS -l walltime=00:05:00
 #PBS -o /home/n_harini/gpu_test.out
 #PBS -e /home/n_harini/gpu_test.err
