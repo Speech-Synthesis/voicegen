@@ -102,6 +102,8 @@ class SynthesizerTrnResearch(SynthesizerTrn):
             attn_f32 = attn.float()
             m_p = torch.matmul(attn_f32.squeeze(1), m_p.float().transpose(1, 2)).transpose(1, 2)
             logs_p = torch.matmul(attn_f32.squeeze(1), logs_p.float().transpose(1, 2)).transpose(1, 2)
+            # Re-clamp logs_p after expansion to ensure values stay in safe range
+            logs_p = torch.clamp(logs_p, min=-7.0, max=2.0)
         else:
             logw_ = self.dp(h, x_mask, g=g)
 

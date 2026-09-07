@@ -394,6 +394,12 @@ class ResidualCouplingLayer(nn.Module):
         self.post.bias.data.zero_()
 
     def forward(self, x, x_mask, g=None, reverse=False):
+        # Force entire computation to FP32 for gradient stability
+        x = x.float()
+        x_mask = x_mask.float()
+        if g is not None:
+            g = g.float()
+
         x0, x1 = torch.split(x, [self.half_channels] * 2, 1)
         h = self.pre(x0) * x_mask
         h = self.enc(h, x_mask, g=g)
@@ -405,15 +411,14 @@ class ResidualCouplingLayer(nn.Module):
             logs = torch.zeros_like(m)
 
         if not reverse:
-            # Use FP32 for exp to prevent overflow in backward pass
-            x1 = m + x1 * torch.exp(logs.float()).to(x.dtype) * x_mask
+            x1 = m + x1 * torch.exp(logs) * x_mask
             x = torch.cat([x0, x1], 1)
-            logdet = torch.sum(logs.float(), [1, 2])
-            return x, logdet.to(x.dtype)
+            logdet = torch.sum(logs, [1, 2])
+            return x, logdet  # Return FP32
         else:
-            x1 = (x1 - m) * torch.exp(-logs.float()).to(x.dtype) * x_mask
+            x1 = (x1 - m) * torch.exp(-logs) * x_mask
             x = torch.cat([x0, x1], 1)
-            return x
+            return x  # Return FP32
 
 
 class ResidualCouplingBlock(nn.Module):
@@ -547,49 +552,49 @@ class StochasticDurationPredictor(nn.Module):
             flows = self.flows
             assert w is not None
 
-            # Use FP32 for all probability/log computations to prevent gradient overflow
-            x_f32 = x.float()
-            x_mask_f32 = x_mask.float()
-            w_f32 = w.float()
+            # CRITICAL: Force ENTIRE computation to FP32 to prevent gradient overflow
+            # The log/exp/logsigmoid operations and their gradients can overflow in FP16
+            with torch.cuda.amp.autocast(enabled=False):
+                x_f32 = x.float()
+                x_mask_f32 = x_mask.float()
+                w_f32 = w.float()
 
-            logdet_tot_q = torch.zeros(x.size(0), device=x.device, dtype=torch.float32)
-            h_w = self.post_pre(w)
-            h_w = self.post_convs(h_w, x_mask)
-            h_w = self.post_proj(h_w) * x_mask
-            e_q = torch.randn(w.size(0), 2, w.size(2)).to(device=x.device, dtype=torch.float32) * x_mask_f32
-            z_q = e_q
-            for flow in self.post_flows:
-                z_q, logdet_q = flow(z_q.to(x.dtype), x_mask, g=(x + h_w))
-                z_q = z_q.float()
-                logdet_tot_q = logdet_tot_q + logdet_q.float()
-            z_u, z1 = torch.split(z_q, [1, 1], 1)
-            u = torch.sigmoid(z_u) * x_mask_f32
-            z0 = (w_f32 - u) * x_mask_f32
+                logdet_tot_q = torch.zeros(x.size(0), device=x.device, dtype=torch.float32)
+                h_w = self.post_pre(w.float()).float()
+                h_w = self.post_convs(h_w, x_mask_f32)
+                h_w = self.post_proj(h_w) * x_mask_f32
+                e_q = torch.randn(w.size(0), 2, w.size(2)).to(device=x.device, dtype=torch.float32) * x_mask_f32
+                z_q = e_q
+                for flow in self.post_flows:
+                    z_q, logdet_q = flow(z_q, x_mask_f32, g=(x_f32 + h_w))
+                    logdet_tot_q = logdet_tot_q + logdet_q
+                z_u, z1 = torch.split(z_q, [1, 1], 1)
+                u = torch.sigmoid(z_u) * x_mask_f32
+                z0 = (w_f32 - u) * x_mask_f32
 
-            # logsigmoid in FP32 to prevent gradient overflow
-            logsigmoid_term = (F.logsigmoid(z_u) + F.logsigmoid(-z_u)) * x_mask_f32
-            logdet_tot_q = logdet_tot_q + torch.sum(logsigmoid_term, [1, 2])
-            logq = torch.sum(-0.5 * (math.log(2 * math.pi) + (e_q ** 2)) * x_mask_f32, [1, 2]) - logdet_tot_q
+                # logsigmoid in FP32 to prevent gradient overflow
+                logsigmoid_term = (F.logsigmoid(z_u) + F.logsigmoid(-z_u)) * x_mask_f32
+                logdet_tot_q = logdet_tot_q + torch.sum(logsigmoid_term, [1, 2])
+                logq = torch.sum(-0.5 * (math.log(2 * math.pi) + (e_q ** 2)) * x_mask_f32, [1, 2]) - logdet_tot_q
 
-            logdet_tot = torch.zeros(x.size(0), device=x.device, dtype=torch.float32)
-            z0, logdet = self.log_flow(z0.to(x.dtype), x_mask)
-            z0 = z0.float()
-            logdet_tot = logdet_tot + logdet.float()
-            z = torch.cat([z0, z1], 1)
-            for flow in flows:
-                z, logdet = flow(z.to(x.dtype), x_mask, g=x, reverse=reverse)
-                z = z.float()
-                logdet_tot = logdet_tot + logdet.float()
-            nll = torch.sum(0.5 * (math.log(2 * math.pi) + (z ** 2)) * x_mask_f32, [1, 2]) - logdet_tot
+                logdet_tot = torch.zeros(x.size(0), device=x.device, dtype=torch.float32)
+                z0, logdet = self.log_flow(z0, x_mask_f32)
+                logdet_tot = logdet_tot + logdet
+                z = torch.cat([z0, z1], 1)
+                for flow in flows:
+                    z, logdet = flow(z, x_mask_f32, g=x_f32, reverse=reverse)
+                    logdet_tot = logdet_tot + logdet
+                nll = torch.sum(0.5 * (math.log(2 * math.pi) + (z ** 2)) * x_mask_f32, [1, 2]) - logdet_tot
 
-            # Return in original dtype
-            return (nll + logq).to(x.dtype)  # [b]
+            return nll + logq  # Return FP32
         else:
+            # Inference mode - can use FP16 for speed
             flows = list(reversed(self.flows))
             flows = flows[:-2] + [flows[-1]]  # remove a useless vflow
-            z = torch.randn(x.size(0), 2, x.size(2)).to(device=x.device, dtype=x.dtype) * noise_scale
-            for flow in flows:
-                z = flow(z, x_mask, g=x, reverse=reverse)
+            z = torch.randn(x.size(0), 2, x.size(2)).to(device=x.device, dtype=torch.float32) * noise_scale
+            with torch.cuda.amp.autocast(enabled=False):
+                for flow in flows:
+                    z = flow(z, x_mask.float(), g=x.float(), reverse=reverse)
             z0, z1 = torch.split(z, [1, 1], 1)
             logw = z0
             return logw
@@ -637,21 +642,22 @@ class Log(nn.Module):
     def forward(self, x, x_mask, reverse=False, **kwargs):
         if not reverse:
             # Force FP32 for log to prevent gradient overflow (1/x can exceed FP16 max)
+            # Keep output in FP32 to maintain gradient precision through backward pass
             x_f32 = x.float()
             x_mask_f32 = x_mask.float()
             y = torch.log(torch.clamp_min(x_f32, 1e-5)) * x_mask_f32
             logdet = torch.sum(-y, [1, 2])
-            return y.to(x.dtype), logdet.to(x.dtype)
+            return y, logdet  # Return FP32
         else:
             # Force FP32 for exp to prevent overflow
             x_f32 = x.float()
             x_mask_f32 = x_mask.float()
             result = torch.exp(x_f32) * x_mask_f32
-            return result.to(x.dtype)
+            return result  # Return FP32
 
 
 class ElementwiseAffine(nn.Module):
-    """Elementwise affine transformation - uses FP32 for exp for numerical stability"""
+    """Elementwise affine transformation - uses FP32 for numerical stability"""
     def __init__(self, channels):
         super().__init__()
         self.channels = channels
@@ -659,17 +665,19 @@ class ElementwiseAffine(nn.Module):
         self.logs = nn.Parameter(torch.zeros(channels, 1))
 
     def forward(self, x, x_mask, reverse=False, **kwargs):
+        # Force entire computation in FP32 to prevent gradient overflow
+        x_f32 = x.float()
+        x_mask_f32 = x_mask.float()
         if not reverse:
-            # Force FP32 for exp to prevent overflow
-            scale = torch.exp(self.logs.float()).to(x.dtype)
-            y = self.m + scale * x
-            y = y * x_mask
-            logdet = torch.sum(self.logs.float() * x_mask.float(), [1, 2]).to(x.dtype)
-            return y, logdet
+            scale = torch.exp(self.logs.float())
+            y = self.m.float() + scale * x_f32
+            y = y * x_mask_f32
+            logdet = torch.sum(self.logs.float() * x_mask_f32, [1, 2])
+            return y, logdet  # Return FP32
         else:
-            scale = torch.exp(-self.logs.float()).to(x.dtype)
-            x = (x - self.m) * scale * x_mask
-            return x
+            scale = torch.exp(-self.logs.float())
+            x_out = (x_f32 - self.m.float()) * scale * x_mask_f32
+            return x_out  # Return FP32
 
 
 class ConvFlow(nn.Module):
