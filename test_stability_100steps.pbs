@@ -9,12 +9,11 @@
 # ============================================================
 # VITS Numerical Stability Test (100 steps)
 # ============================================================
-# This script tests the stability fixes by running 100 training
-# steps with real VCTK data. Verifies:
-#   - No NaN/Inf values
-#   - z_p, logs_p, logs_q in reasonable ranges
-#   - KL loss not in billions
-#   - Training completes without crashing
+# Tests stability fixes by running 100 training steps with
+# real VCTK data. Verifies:
+#   - No NaN/Inf values in activations or gradients
+#   - Gradient norms stay bounded
+#   - All 100 steps complete successfully
 # ============================================================
 
 echo "============================================================"
@@ -42,13 +41,18 @@ which python
 python --version
 echo "PyTorch: $(python -c 'import torch; print(torch.__version__)')"
 echo "CUDA Available: $(python -c 'import torch; print(torch.cuda.is_available())')"
-echo "GPU: $(python -c 'import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A")')"
+if python -c 'import torch; exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
+    echo "GPU: $(python -c 'import torch; print(torch.cuda.get_device_name(0))')"
+else
+    echo "GPU: N/A (CPU mode)"
+fi
 
 # Verify stability fixes are present
 echo ""
 echo "Verifying stability fixes..."
 python -c "
 from models import PosteriorEncoder, TextEncoder
+from prosody_encoder import ProsodyEncoder
 import torch
 
 # Check PosteriorEncoder has zero-initialized logs
@@ -66,6 +70,16 @@ logs_bias_t = tenc.proj.bias.data[192:]
 assert torch.allclose(logs_weight_t, torch.zeros_like(logs_weight_t)), 'TextEncoder logs not zero-initialized!'
 assert torch.allclose(logs_bias_t, torch.zeros_like(logs_bias_t)), 'TextEncoder logs bias not zero-initialized!'
 print('TextEncoder: logs zero-initialized OK')
+
+# Check ProsodyEncoder has small weight initialization
+penc = ProsodyEncoder()
+inp_weight_norm = penc.inp.weight.data.norm().item()
+print(f'ProsodyEncoder: inp weight norm = {inp_weight_norm:.4f} (should be small)')
+assert inp_weight_norm < 1.0, 'ProsodyEncoder inp weights too large!'
+
+# Check that input LayerNorm exists
+assert hasattr(penc, 'input_ln'), 'ProsodyEncoder missing input_ln!'
+print('ProsodyEncoder: input LayerNorm present')
 
 print('All stability fixes verified!')
 "
@@ -97,56 +111,76 @@ echo "Exit code: $EXIT_CODE"
 echo "Elapsed time: ${ELAPSED}s"
 
 if [ $EXIT_CODE -eq 0 ]; then
-    echo "STATUS: SUCCESS - Training completed 100 steps"
+    echo "STATUS: Training script completed"
 else
-    echo "STATUS: FAILED - Training crashed or had errors"
-fi
-
-# Check for NaN/Inf in output
-echo ""
-echo "Checking output for NaN/Inf..."
-if grep -q "\[NaN\]" logs/stability_test.out 2>/dev/null; then
-    echo "WARNING: NaN values detected in training!"
-    grep "\[NaN\]" logs/stability_test.out | head -10
-fi
-
-if grep -q "\[Inf\]" logs/stability_test.out 2>/dev/null; then
-    echo "WARNING: Inf values detected in training!"
-    grep "\[Inf\]" logs/stability_test.out | head -10
+    echo "STATUS: Training script crashed"
 fi
 
 # Check for FIRST NON-FINITE detection
+echo ""
+echo "Checking for non-finite values..."
 if grep -q "FIRST NON-FINITE" logs/stability_test.out 2>/dev/null; then
+    echo "FAILURE: Non-finite values detected!"
     echo ""
-    echo "FIRST NaN/Inf DETECTION:"
-    grep -A 15 "FIRST NON-FINITE" logs/stability_test.out
+    grep -A 15 "FIRST NON-FINITE" logs/stability_test.out | head -20
 fi
 
-# Show gradient norms (indicates if clipping is working)
+# Check for NaN in activations
+if grep -q "\[NaN\]" logs/stability_test.out 2>/dev/null; then
+    echo ""
+    echo "NaN in activations:"
+    grep "\[NaN\]" logs/stability_test.out | head -5
+fi
+
+# Check for Inf in activations
+if grep -q "\[Inf\]" logs/stability_test.out 2>/dev/null; then
+    echo ""
+    echo "Inf in activations:"
+    grep "\[Inf\]" logs/stability_test.out | head -5
+fi
+
+# Show gradient norms progression
 echo ""
-echo "Gradient norm samples:"
-grep "\[Grad\] Step" logs/stability_test.out | tail -10
+echo "Gradient norm samples (first 10 steps):"
+grep "total_norm_before_clip" logs/stability_test.out | head -10
+
+# Check for any skipped steps
+echo ""
+echo "Skipped steps (due to non-finite gradients):"
+SKIPPED=$(grep -c "Skipping optimizer step" logs/stability_test.out 2>/dev/null || echo "0")
+echo "Count: $SKIPPED"
+if [ "$SKIPPED" != "0" ]; then
+    grep "Skipping optimizer step" logs/stability_test.out | head -5
+fi
 
 # Show final statistics
 echo ""
-echo "Final training statistics (last step):"
-grep "\[Stats\]" logs/stability_test.out | tail -10
+echo "Final training statistics (last 5 steps):"
+grep "\[Stats\]" logs/stability_test.out | tail -15
 
 echo ""
 echo "Loss summary (last 10 log entries):"
 grep "Loss Total" logs/stability_test.out | tail -10
 
-# Check for success/failure message
+# Final verdict
 echo ""
+echo "============================================================"
 if grep -q "SUCCESS: No NaN/Inf values detected" logs/stability_test.out 2>/dev/null; then
-    echo "RESULT: Training completed successfully without NaN/Inf!"
+    if [ "$SKIPPED" = "0" ]; then
+        echo "RESULT: PASSED - Training completed 100 steps without NaN/Inf"
+    else
+        echo "RESULT: PARTIAL - Completed but had $SKIPPED skipped steps"
+    fi
 elif grep -q "WARNING: Training encountered NaN/Inf" logs/stability_test.out 2>/dev/null; then
-    echo "RESULT: Training encountered NaN/Inf values!"
+    echo "RESULT: FAILED - Training encountered NaN/Inf values"
+elif grep -q "FIRST NON-FINITE" logs/stability_test.out 2>/dev/null; then
+    echo "RESULT: FAILED - Non-finite values detected"
+else
+    echo "RESULT: UNKNOWN - Check logs manually"
 fi
+echo "============================================================"
 
 echo ""
-echo "============================================================"
 echo "Job Finished: $(date)"
-echo "============================================================"
 
 exit $EXIT_CODE

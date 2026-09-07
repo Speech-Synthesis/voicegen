@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+import math
+
 
 class CrossAttentionFusion(nn.Module):
     """
@@ -9,13 +11,25 @@ class CrossAttentionFusion(nn.Module):
     def __init__(self, h_dim=192, timbre_dim=192, prosody_dim=128,
                  n_heads=2, dropout=0.1):
         super().__init__()
+        self.h_dim = h_dim
+        self.n_heads = n_heads
+        self.head_dim = h_dim // n_heads
+
         self.kv_t = nn.Linear(timbre_dim, h_dim)      # timbre -> KV space
         self.kv_p = nn.Linear(prosody_dim, h_dim)     # prosody -> KV space
         self.attn = nn.MultiheadAttention(h_dim, n_heads,
                                           dropout=dropout, batch_first=True)
         self.ln = nn.LayerNorm(h_dim)
-        # Scaling factor for residual connection to prevent gradient explosion
-        self.residual_scale = 0.1
+
+        # Initialize KV projections with small weights
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize with small weights to prevent gradient explosion."""
+        nn.init.xavier_uniform_(self.kv_t.weight, gain=0.1)
+        nn.init.zeros_(self.kv_t.bias)
+        nn.init.xavier_uniform_(self.kv_p.weight, gain=0.1)
+        nn.init.zeros_(self.kv_p.bias)
 
     def forward(self, x, g, p, p_mask):
         # x: [B, T, H]  (text encoder hidden states as queries)
@@ -42,9 +56,9 @@ class CrossAttentionFusion(nn.Module):
         out, attn_w = self.attn(x, kv, kv, key_padding_mask=pad,
                                 need_weights=True, average_attn_weights=True)
 
-        # Scaled residual connection for training stability
-        # This prevents the attention output from dominating early in training
-        return self.ln(x + self.residual_scale * out), attn_w
+        # Pre-norm residual (store original x before adding)
+        return self.ln(x + out), attn_w
+
 
 class ConcatFusion(nn.Module):
     """
@@ -55,17 +69,22 @@ class ConcatFusion(nn.Module):
         super().__init__()
         self.proj = nn.Linear(h_dim + timbre_dim + prosody_dim, h_dim)
 
+        # Small initialization
+        nn.init.xavier_uniform_(self.proj.weight, gain=0.1)
+        nn.init.zeros_(self.proj.bias)
+
     def forward(self, x, g, p, p_mask):
         # Broadcast timbre across time dimension T
         g_b = g.unsqueeze(1).expand(-1, x.size(1), -1)  # [B, T, Dt]
-        
+
         # Concatenate: [B, T, H + Dt + Dp]
         concat_feat = torch.cat([x, g_b, p], dim=-1)
         out = self.proj(concat_feat)
-        
+
         # Mask padding features
         m = p_mask.unsqueeze(-1).float()
         return out * m, None
+
 
 def build_fusion(cfg, h_dim):
     """

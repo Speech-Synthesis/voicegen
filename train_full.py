@@ -58,14 +58,15 @@ class NaNDetector:
         has_inf = torch.isinf(tensor).any().item()
 
         if has_nan or has_inf:
+            finite_mask = ~torch.isnan(tensor) & ~torch.isinf(tensor)
             self.first_nan_info = {
                 "step": step,
                 "phase": phase,
                 "tensor": name,
                 "has_nan": has_nan,
                 "has_inf": has_inf,
-                "min": tensor[~torch.isnan(tensor) & ~torch.isinf(tensor)].min().item() if (~torch.isnan(tensor) & ~torch.isinf(tensor)).any() else float('nan'),
-                "max": tensor[~torch.isnan(tensor) & ~torch.isinf(tensor)].max().item() if (~torch.isnan(tensor) & ~torch.isinf(tensor)).any() else float('nan'),
+                "min": tensor[finite_mask].min().item() if finite_mask.any() else float('nan'),
+                "max": tensor[finite_mask].max().item() if finite_mask.any() else float('nan'),
                 "nan_count": torch.isnan(tensor).sum().item(),
                 "inf_count": torch.isinf(tensor).sum().item(),
                 "total_elements": tensor.numel()
@@ -74,34 +75,41 @@ class NaNDetector:
         return False
 
     def check_gradients(self, model, step):
-        """Check all parameter gradients for NaN/Inf."""
+        """Check all parameter gradients for NaN/Inf. Returns (has_bad, total_norm, first_bad_param)."""
         if not self.enabled or self.first_nan_info is not None:
-            return False, 0.0
+            return False, 0.0, None
 
-        total_norm = 0.0
+        total_norm_sq = 0.0
+        first_bad = None
+
         for name, param in model.named_parameters():
             if param.grad is not None:
                 grad = param.grad.data
-                param_norm = grad.norm(2).item()
-                total_norm += param_norm ** 2
+                grad_norm = grad.norm(2).item()
 
+                # Track if this gradient has issues
                 has_nan = torch.isnan(grad).any().item()
                 has_inf = torch.isinf(grad).any().item()
 
-                if has_nan or has_inf:
+                if (has_nan or has_inf) and first_bad is None:
+                    first_bad = name
                     self.first_nan_info = {
                         "step": step,
                         "phase": "gradient",
                         "tensor": f"grad_{name}",
                         "has_nan": has_nan,
                         "has_inf": has_inf,
-                        "grad_norm": param_norm,
+                        "grad_norm": grad_norm,
                         "nan_count": torch.isnan(grad).sum().item(),
                         "inf_count": torch.isinf(grad).sum().item(),
                     }
-                    return True, total_norm ** 0.5
 
-        return False, total_norm ** 0.5
+                # Accumulate norm (even if inf, to detect the problem)
+                if math.isfinite(grad_norm):
+                    total_norm_sq += grad_norm ** 2
+
+        total_norm = total_norm_sq ** 0.5
+        return first_bad is not None, total_norm, first_bad
 
     def report(self):
         """Print detailed report of first NaN occurrence."""
@@ -116,19 +124,57 @@ class NaNDetector:
         return False
 
 
-def compute_grad_norm_by_module(model, module_prefixes):
-    """Compute gradient norm for specific module groups."""
-    norms = {}
+def compute_grad_stats_by_module(model, module_prefixes):
+    """
+    Compute detailed gradient statistics for specific module groups.
+    Returns dict with: norm, max_abs, num_params, nan_count, inf_count
+    """
+    stats = {}
     for prefix in module_prefixes:
-        total = 0.0
-        count = 0
+        total_norm_sq = 0.0
+        max_abs = 0.0
+        num_params = 0
+        nan_count = 0
+        inf_count = 0
+
         for name, param in model.named_parameters():
             if name.startswith(prefix) and param.grad is not None:
-                total += param.grad.data.norm(2).item() ** 2
-                count += 1
-        if count > 0:
-            norms[prefix] = total ** 0.5
-    return norms
+                grad = param.grad.data
+                num_params += 1
+
+                # Count bad values
+                nan_count += torch.isnan(grad).sum().item()
+                inf_count += torch.isinf(grad).sum().item()
+
+                # Get finite values for stats
+                finite_grad = grad[torch.isfinite(grad)]
+                if finite_grad.numel() > 0:
+                    grad_norm = finite_grad.norm(2).item()
+                    total_norm_sq += grad_norm ** 2
+                    max_abs = max(max_abs, finite_grad.abs().max().item())
+
+        if num_params > 0:
+            stats[prefix] = {
+                "norm": total_norm_sq ** 0.5,
+                "max_abs": max_abs,
+                "num_params": num_params,
+                "nan_count": nan_count,
+                "inf_count": inf_count,
+            }
+    return stats
+
+
+def compute_total_grad_norm(model):
+    """Compute total gradient L2 norm across all parameters."""
+    total_norm_sq = 0.0
+    for param in model.parameters():
+        if param.grad is not None:
+            grad_norm = param.grad.data.norm(2).item()
+            if math.isfinite(grad_norm):
+                total_norm_sq += grad_norm ** 2
+            else:
+                return float('inf')  # Return inf if any gradient is non-finite
+    return total_norm_sq ** 0.5
 
 
 # ============================================================================
@@ -549,8 +595,11 @@ def train():
                     betas=(0.5, 0.9)
                 )
 
-    # AMP scaler
-    scaler = GradScaler(enabled=hps.train.fp16_run)
+    # AMP scaler - ONLY enable on CUDA, not CPU
+    # On CPU, autocast is essentially a no-op but GradScaler can cause issues
+    use_amp = hps.train.fp16_run and torch.cuda.is_available()
+    scaler = GradScaler(enabled=use_amp)
+    print(f"AMP enabled: {use_amp} (fp16_run={hps.train.fp16_run}, CUDA={torch.cuda.is_available()})")
 
     # Resume from checkpoint
     step = 0
@@ -574,10 +623,8 @@ def train():
     # Initialize NaN detector for debugging
     nan_detector = NaNDetector()
 
-    # Module prefixes for gradient norm tracking
-    module_prefixes = ["enc_p", "enc_q", "flow", "dec", "dp"]
-    if use_research:
-        module_prefixes.extend(["prosody_enc", "fusion"])
+    # Module prefixes for gradient norm tracking (in order of forward pass)
+    module_prefixes = ["enc_p", "prosody_enc", "fusion", "enc_q", "flow", "dp", "dec"]
 
     epoch = 0
     while step < total_steps:
@@ -609,7 +656,7 @@ def train():
             # ================================================================
             optimizer_d.zero_grad()
 
-            with autocast(enabled=hps.train.fp16_run):
+            with autocast(enabled=use_amp):
                 # Generator forward (detached for discriminator training)
                 if use_research:
                     outputs, extras = net_g(x_padded, x_lengths, spec_padded, spec_lengths,
@@ -629,9 +676,13 @@ def train():
                 loss_disc, losses_disc_r, losses_disc_g = discriminator_loss(y_d_hat_r, y_d_hat_g)
 
             scaler.scale(loss_disc).backward()
-            scaler.unscale_(optimizer_d)
-            grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), 5.0)
-            scaler.step(optimizer_d)
+            if use_amp:
+                scaler.unscale_(optimizer_d)
+            grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), 1.0)
+            if use_amp:
+                scaler.step(optimizer_d)
+            else:
+                optimizer_d.step()
 
             # ================================================================
             # MINE Statistics Network Step (if using MINE)
@@ -652,7 +703,7 @@ def train():
             # ================================================================
             optimizer_g.zero_grad()
 
-            with autocast(enabled=hps.train.fp16_run):
+            with autocast(enabled=use_amp):
                 # Forward pass
                 if use_research:
                     outputs, extras = net_g(x_padded, x_lengths, spec_padded, spec_lengths,
@@ -764,47 +815,70 @@ def train():
             # Backward pass
             scaler.scale(loss_total).backward()
 
-            # Unscale gradients for clipping and inspection
-            scaler.unscale_(optimizer_g)
+            # Unscale gradients for clipping and inspection (only if using scaler)
+            if use_amp:
+                scaler.unscale_(optimizer_g)
 
-            # Check for NaN gradients before clipping
-            nan_in_grad, total_grad_norm_before_clip = nan_detector.check_gradients(net_g, step)
+            # Compute total gradient norm BEFORE clipping
+            total_grad_norm_before_clip = compute_total_grad_norm(net_g)
+
+            # Check for NaN/Inf gradients before clipping
+            nan_in_grad, _, first_bad_param = nan_detector.check_gradients(net_g, step)
+
+            # Log gradient stats for first 100 steps
+            if step < 100:
+                module_stats = compute_grad_stats_by_module(net_g, module_prefixes)
+                print(f"[Grad] Step {step}: total_norm_before_clip={total_grad_norm_before_clip:.6g}")
+                for mod, stats in module_stats.items():
+                    status = ""
+                    if stats["nan_count"] > 0:
+                        status = f" [NaN:{stats['nan_count']}]"
+                    if stats["inf_count"] > 0:
+                        status += f" [Inf:{stats['inf_count']}]"
+                    print(f"[Grad]   {mod}: norm={stats['norm']:.4f}, max_abs={stats['max_abs']:.4f}{status}")
 
             if nan_in_grad:
-                # Skip this step if gradients are NaN
+                # Skip this step if gradients contain NaN/Inf
                 nan_detector.report()
-                print(f"[Step {step}] Skipping optimizer step due to NaN gradients")
+                print(f"[Step {step}] Skipping optimizer step due to non-finite gradients in: {first_bad_param}")
                 optimizer_g.zero_grad()
-                scaler.update()
+                if use_amp:
+                    scaler.update()
                 step += 1
                 continue
 
-            # Gradient clipping - use a tighter clip for stability
-            # Original VITS uses 5.0, but with research additions we use 1.0
-            grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), 1.0)
-
-            # Log gradient norm before/after clipping for debugging
-            if step < 50:
-                print(f"[Grad] Step {step}: norm_before_clip={total_grad_norm_before_clip:.4f}, norm_after_clip={grad_norm_g:.4f}")
-                # Per-module gradient norms
-                module_norms = compute_grad_norm_by_module(net_g, module_prefixes)
-                for mod, norm in module_norms.items():
-                    print(f"[Grad] {mod}: {norm:.4f}")
-
-            # Check if gradients are finite after clipping
-            if not torch.isfinite(grad_norm_g):
-                print(f"[Step {step}] Non-finite gradient norm after clipping: {grad_norm_g}")
+            # Check if total gradient norm is finite before clipping
+            if not math.isfinite(total_grad_norm_before_clip):
+                print(f"[Step {step}] Non-finite total gradient norm before clipping: {total_grad_norm_before_clip}")
+                print(f"[Step {step}] Skipping optimizer step")
                 optimizer_g.zero_grad()
-                scaler.update()
+                if use_amp:
+                    scaler.update()
                 step += 1
                 continue
+
+            # Gradient clipping
+            # Note: clip_grad_norm_ returns the ORIGINAL norm (before clipping), not the clipped norm
+            original_norm = torch.nn.utils.clip_grad_norm_(net_g.parameters(), 1.0)
+
+            # Compute actual post-clipping norm
+            grad_norm_after_clip = compute_total_grad_norm(net_g)
+
+            if step < 100:
+                print(f"[Grad] Step {step}: after_clip={grad_norm_after_clip:.6g} (clipped from {original_norm:.6g})")
 
             # Optimizer step
-            scaler.step(optimizer_g)
-            scaler.update()
+            if use_amp:
+                scaler.step(optimizer_g)
+                scaler.update()
+            else:
+                optimizer_g.step()
 
-            # Check parameters after optimizer step
-            if nan_detector.enabled and step < 50:
+            # Store for logging
+            grad_norm_g = grad_norm_after_clip
+
+            # Check parameters after optimizer step (first 100 steps only)
+            if nan_detector.enabled and step < 100:
                 for name, param in net_g.named_parameters():
                     if torch.isnan(param.data).any() or torch.isinf(param.data).any():
                         nan_detector.first_nan_info = {
